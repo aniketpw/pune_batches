@@ -1,0 +1,8 @@
+{
+  "name": "Pune Batches",
+  "description": "A powerful workspace application for managing class batches, scanning Google Drive folders, and updating Google Sheets links in real time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
