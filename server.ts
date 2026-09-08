@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { google } from "googleapis";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 
@@ -21,11 +20,17 @@ const ai = new GoogleGenAI({
   },
 });
 
-async function startServer() {
-  const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+export const app = express();
 
-  app.use(express.json());
+app.use(express.json());
+
+// Handle Vercel serverless URL rewrites so Express routes match req.originalUrl
+app.use((req, _res, next) => {
+  if (req.originalUrl && req.url !== req.originalUrl) {
+    req.url = req.originalUrl;
+  }
+  next();
+});
 
   // API Route Helper: Extract and validate Google OAuth token
   const getGoogleAuth = (req: express.Request) => {
@@ -1933,14 +1938,18 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
     }
   });
 
-  // Serve static assets / Vite middleware
-  if (process.env.NODE_ENV !== "production") {
+async function startServer() {
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+  // Serve static assets / Vite middleware in local development
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!process.env.VERCEL) {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -1948,21 +1957,27 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  if (!process.env.VERCEL) {
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
 
-  server.on("error", (err: any) => {
-    if (err.code === "EADDRINUSE" && !process.env.PORT) {
-      const fallbackPort = PORT + 1;
-      console.warn(`Port ${PORT} is in use, falling back to port ${fallbackPort}...`);
-      app.listen(fallbackPort, "0.0.0.0", () => {
-        console.log(`Server running on port ${fallbackPort}`);
-      });
-    } else {
-      console.error("Server error:", err);
-    }
-  });
+    server.on("error", (err: any) => {
+      if (err.code === "EADDRINUSE" && !process.env.PORT) {
+        const fallbackPort = PORT + 1;
+        console.warn(`Port ${PORT} is in use, falling back to port ${fallbackPort}...`);
+        app.listen(fallbackPort, "0.0.0.0", () => {
+          console.log(`Server running on port ${fallbackPort}`);
+        });
+      } else {
+        console.error("Server error:", err);
+      }
+    });
+  }
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
