@@ -1812,13 +1812,15 @@ ${scheduleContext}
 #### 📅 Timetable Summary:
 - Live classes, subjects, and teacher emails are extracted directly from Raw_DB above.`;
 
+    const openRouterKey = (process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || "").trim();
+
     // If API key is missing, provide rich rule-based fallback response
-    if (!process.env.GEMINI_API_KEY) {
+    if (!openRouterKey) {
       return res.json({ explanation: fallbackText });
     }
 
     try {
-      // Construct prompt for Gemini
+      // Construct prompt for AI
       const prompt = `You are "Batch Finder Pro AI Copilot" - an expert assistant for Physics Wallah (PW) offline centers in India.
 Your task is to decode this specific batch code: "${batchCode}".
 
@@ -1847,8 +1849,38 @@ Please provide a highly polished, professional, and actionable academic briefing
 
 Keep the output clean, encouraging, professional, and under 400 words.`;
 
+      if (openRouterKey.startsWith("sk-or-v1-")) {
+        const candidateModels = [
+          "nvidia/nemotron-3.5-lightning:free",
+          "nex-agi/nex-n2.5-mini:free",
+          "google/gemma-4-26b-a4b-it:free",
+        ];
+        for (const candidateModel of candidateModels) {
+          try {
+            const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${openRouterKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://pune-batches.vercel.app",
+                "X-Title": "Pune Batches Copilot",
+              },
+              body: JSON.stringify({
+                model: candidateModel,
+                messages: [{ role: "user", content: prompt }]
+              })
+            });
+            if (orRes.ok) {
+              const data = await orRes.json();
+              const text = data.choices?.[0]?.message?.content;
+              if (text) return res.json({ explanation: text });
+            }
+          } catch {}
+        }
+      }
+
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-2.5-flash",
         contents: prompt,
       });
 
@@ -1879,6 +1911,76 @@ Keep the output clean, encouraging, professional, and under 400 words.`;
 
 ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Here is a quick static tip: Keep your Google Drive folders organized by subject (Physics, Chemistry, Math/Biology) and create a separate folder for "DPP Solutions" to minimize student queries!`
         });
+      }
+
+      const openRouterKey = (process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || "").trim();
+
+      // Check if key is an OpenRouter key
+      if (openRouterKey.startsWith("sk-or-v1-")) {
+        const systemPrompt = `You are "Batch Finder Pro AI Copilot", a brilliant academic coordinator and counselor for Physics Wallah (PW) centers. Help the Batch Manager with operational issues, student messaging, organizing Drive files, and answering center-related questions. You have live access to the center timetable from Raw_DB. Keep answers clear, tactical, and brief (under 200 words).${
+          contextBatch
+            ? `\n\nContext: The user is currently viewing batch "${contextBatch.displayName}" (Category: ${contextBatch.category}, Phase: ${contextBatch.phase}, Shift: ${contextBatch.timeSlot}, Manager Assigned: ${contextBatch.bmEmail || "None"}).${scheduleText}`
+            : ""
+        }`;
+
+        const openRouterMessages: any[] = [
+          { role: "system", content: systemPrompt }
+        ];
+
+        if (Array.isArray(history)) {
+          history.forEach((turn: any) => {
+            if (turn.role && turn.text) {
+              openRouterMessages.push({
+                role: turn.role === "user" ? "user" : "assistant",
+                content: turn.text
+              });
+            }
+          });
+        }
+
+        openRouterMessages.push({
+          role: "user",
+          content: message
+        });
+
+        // Try free fast OpenRouter models
+        const candidateModels = [
+          "nvidia/nemotron-3.5-lightning:free",
+          "nex-agi/nex-n2.5-mini:free",
+          "google/gemma-4-26b-a4b-it:free",
+          "google/gemma-4-31b-it:free",
+        ];
+
+        let openRouterReply = "";
+        for (const candidateModel of candidateModels) {
+          try {
+            const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${openRouterKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://pune-batches.vercel.app",
+                "X-Title": "Pune Batches Copilot",
+              },
+              body: JSON.stringify({
+                model: candidateModel,
+                messages: openRouterMessages,
+              })
+            });
+
+            if (orRes.ok) {
+              const data = await orRes.json();
+              openRouterReply = data.choices?.[0]?.message?.content || "";
+              if (openRouterReply) break;
+            }
+          } catch (mErr) {
+            console.warn(`OpenRouter model ${candidateModel} failed:`, mErr);
+          }
+        }
+
+        if (openRouterReply) {
+          return res.json({ reply: openRouterReply });
+        }
       }
 
       // Format conversation history for Gemini
@@ -1925,7 +2027,7 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
       });
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-2.5-flash",
         contents: formattedContents,
       });
 
