@@ -246,7 +246,11 @@ export default function AiCopilotPanel({
             phase: activeBatch.phase,
             timeSlot: activeBatch.timeSlot,
             bmEmail: activeBatch.bmEmail,
-            todayLectures: fetchedSchedule?.todayLectures || [],
+            todayLectures: (fetchedSchedule?.todayLectures && fetchedSchedule.todayLectures.length > 0)
+              ? fetchedSchedule.todayLectures
+              : (fetchedSchedule?.allLectures || []).filter((l) => 
+                  getLectureDay(l) === (fetchedSchedule?.todayDay || new Date().toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Kolkata' })).toUpperCase().substring(0, 3)
+                ),
             allLectures: fetchedSchedule?.allLectures || [],
             auditIssues: fetchedSchedule?.auditIssues || [],
             extraClasses: fetchedSchedule?.extraClasses || [],
@@ -364,10 +368,10 @@ export default function AiCopilotPanel({
     if (selectedDayFilter === 'TODAY') {
       const dayLabel = `Today (${scheduleData.todayDay}, ${scheduleData.todayDate})`;
       let text = `📅 *PW Class Schedule - ${dayLabel}*\n📍 *Center:* ${center}\n📚 *Batch:* ${batchName}\n\n`;
-      if (scheduleData.todayLectures.length === 0) {
+      if (currentTodayLectures.length === 0) {
         text += `No lectures scheduled for today.\n`;
       } else {
-        scheduleData.todayLectures.forEach((lec, i) => {
+        currentTodayLectures.forEach((lec, i) => {
           text += `*Lecture ${i + 1}:* ${lec.timeRange || `${lec.startTime} - ${lec.endTime}`}\n`;
           text += `🔹 *Subject:* ${lec.subject || 'General'}\n`;
           text += `👨‍🏫 *Faculty:* ${lec.facultyCode || 'TBD'}\n`;
@@ -557,10 +561,23 @@ export default function AiCopilotPanel({
     return '';
   }, []);
 
+  const currentTodayLectures = React.useMemo(() => {
+    if (!scheduleData) return [];
+    if (scheduleData.todayLectures && scheduleData.todayLectures.length > 0) {
+      return scheduleData.todayLectures;
+    }
+    // Fallback: match by today's day name (e.g. WED)
+    const todayD3 = (scheduleData.todayDay || new Date().toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Kolkata' })).toUpperCase().substring(0, 3);
+    return (scheduleData.allLectures || []).filter((l) => {
+      const d3 = getLectureDay(l);
+      return d3 === todayD3;
+    });
+  }, [scheduleData, getLectureDay]);
+
   const dayCounts = React.useMemo(() => {
     if (!scheduleData) return {} as Record<string, number>;
     const counts: Record<string, number> = {
-      TODAY: scheduleData.todayLectures?.length || 0,
+      TODAY: currentTodayLectures.length,
       ALL: scheduleData.allLectures?.length || 0,
     };
     (scheduleData.allLectures || []).forEach((l) => {
@@ -572,7 +589,7 @@ export default function AiCopilotPanel({
       });
     });
     return counts;
-  }, [scheduleData, getLectureDay]);
+  }, [scheduleData, getLectureDay, currentTodayLectures]);
 
   const groupedLecturesByDay = React.useMemo(() => {
     if (!scheduleData?.allLectures) return [];
@@ -1026,12 +1043,12 @@ export default function AiCopilotPanel({
                   </span>
                   {scheduleData && (
                     <span className={`px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase flex-shrink-0 ${
-                      selectedDayFilter === 'TODAY' && scheduleData.todayLectures.length > 0 
+                      selectedDayFilter === 'TODAY' && currentTodayLectures.length > 0 
                         ? 'bg-emerald-100 text-emerald-800' 
                         : 'bg-slate-200 text-slate-700'
                     }`}>
                       {selectedDayFilter === 'TODAY'
-                        ? `${scheduleData.todayLectures.length} Class${scheduleData.todayLectures.length !== 1 ? 'es' : ''}`
+                        ? `${currentTodayLectures.length} Class${currentTodayLectures.length !== 1 ? 'es' : ''}`
                         : selectedDayFilter === 'ALL'
                           ? `${scheduleData.allLectures.length} Class${scheduleData.allLectures.length !== 1 ? 'es' : ''}`
                           : `${dayCounts[selectedDayFilter] || 0} Class${(dayCounts[selectedDayFilter] || 0) !== 1 ? 'es' : ''}`}
@@ -1118,14 +1135,14 @@ export default function AiCopilotPanel({
                   </div>
                 ) : selectedDayFilter === 'TODAY' ? (
                   /* TODAY: STRICTLY TODAY'S CLASSES ONLY */
-                  scheduleData && scheduleData.todayLectures.length > 0 ? (
+                  currentTodayLectures.length > 0 ? (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between px-1 text-[9px] font-black uppercase tracking-wider text-slate-700">
-                        <span>Today's Classes • {scheduleData.todayDay} ({scheduleData.todayDate})</span>
-                        <span className="text-emerald-700 font-black">{scheduleData.todayLectures.length} Class{scheduleData.todayLectures.length !== 1 ? 'es' : ''}</span>
+                        <span>Today's Classes • {scheduleData?.todayDay} ({scheduleData?.todayDate})</span>
+                        <span className="text-emerald-700 font-black">{currentTodayLectures.length} Class{currentTodayLectures.length !== 1 ? 'es' : ''}</span>
                       </div>
                       <div className="space-y-1.5">
-                        {scheduleData.todayLectures.map((lec: LectureSchedule, idx: number) => 
+                        {currentTodayLectures.map((lec: LectureSchedule, idx: number) => 
                           renderLectureCard(lec, `today-${idx}`, false)
                         )}
                       </div>
@@ -1155,21 +1172,6 @@ export default function AiCopilotPanel({
                           </p>
                         )}
                       </div>
-
-                      {/* DIRECT PREVIEW OF SCHEDULED CLASSES THIS WEEK */}
-                      {scheduleData && scheduleData.allLectures.length > 0 && (
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between px-1 text-[9px] font-black uppercase tracking-wider text-slate-500">
-                            <span>Scheduled Classes for this Batch ({scheduleData.allLectures.length}):</span>
-                            <span className="text-[7.5px] text-slate-400 font-bold">ALL TIMETABLE & EXTRA LECTURES</span>
-                          </div>
-                          <div className="space-y-1.5">
-                            {scheduleData.allLectures.map((lec: LectureSchedule, idx: number) => 
-                              renderLectureCard(lec, `today-preview-${idx}`, true)
-                            )}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   )
                 ) : selectedDayFilter === 'ALL' ? (

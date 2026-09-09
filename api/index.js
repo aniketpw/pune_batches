@@ -273,14 +273,15 @@ function isDateOrDayMatchingToday(rowDate, rowDay, todayDateStr, todayDayStr, no
     try {
       const parsed = new Date(rowDate);
       if (!isNaN(parsed.getTime())) {
-        return parsed.getDate() === nowIst.getDate() && parsed.getMonth() === nowIst.getMonth() && parsed.getFullYear() === nowIst.getFullYear();
+        if (parsed.getDate() === nowIst.getDate() && parsed.getMonth() === nowIst.getMonth() && parsed.getFullYear() === nowIst.getFullYear()) {
+          return true;
+        }
       }
     } catch {
     }
-    return false;
   }
-  if (normRowDay && normTodayDay) {
-    return normRowDay === normTodayDay;
+  if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
+    return true;
   }
   return false;
 }

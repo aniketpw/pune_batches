@@ -346,7 +346,7 @@ app.use((req, _res, next) => {
     const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
     const normTodayDay = (todayDayStr || "").trim().toUpperCase().substring(0, 3);
 
-    // If row has a date specified, compare dates strictly first
+    // 1. Direct date match (e.g. 09-Sep matches 09-Sep)
     if (normRowDate && normToday) {
       if (normRowDate === normToday || normRowDate.includes(normToday) || normToday.includes(normRowDate)) {
         return true;
@@ -354,20 +354,20 @@ app.use((req, _res, next) => {
       try {
         const parsed = new Date(rowDate);
         if (!isNaN(parsed.getTime())) {
-          return (
+          if (
             parsed.getDate() === nowIst.getDate() &&
             parsed.getMonth() === nowIst.getMonth() &&
             parsed.getFullYear() === nowIst.getFullYear()
-          );
+          ) {
+            return true;
+          }
         }
       } catch {}
-      // Date is present and does not match today's date -> NOT today!
-      return false;
     }
 
-    // If no date is given in the row, match by day-of-week
-    if (normRowDay && normTodayDay) {
-      return normRowDay === normTodayDay;
+    // 2. In weekly timetable sheets (Raw_DB), recurring schedule matches by Day-of-Week (e.g. WED matches WED)
+    if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
+      return true;
     }
 
     return false;
