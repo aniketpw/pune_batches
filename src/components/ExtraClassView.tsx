@@ -807,17 +807,32 @@ export default function ExtraClassView({
                     <h4 className="text-sm sm:text-base font-bold text-slate-800 tracking-tight font-sans truncate">
                       {item.formattedBatchName || item.batchCode}
                     </h4>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(item.batchCode);
-                        showToast(`Copied batch code: ${item.batchCode}`);
-                      }}
-                      className="p-1 text-slate-400 hover:text-slate-900 hover:bg-[#FAF9F5] rounded-[2px] transition-all cursor-pointer flex-shrink-0"
-                      title="Copy batch code"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      {item.adminUrl && (
+                        <a
+                          href={item.adminUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          referrerPolicy="no-referrer"
+                          className="px-2 py-0.5 text-[9px] sm:text-[10px] font-black uppercase tracking-wider bg-slate-900 hover:bg-black text-white rounded-[2px] flex items-center gap-1 transition-all cursor-pointer shadow-xs active:scale-95"
+                          title={`Open ${item.batchCode} in PW Admin portal`}
+                        >
+                          <span>Admin</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(item.batchCode);
+                          showToast(`Copied batch code: ${item.batchCode}`);
+                        }}
+                        className="p-1 text-slate-400 hover:text-slate-900 hover:bg-[#FAF9F5] rounded-[2px] transition-all cursor-pointer flex-shrink-0"
+                        title="Copy batch code"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   {/* Stream & Phase Badges (Identical to BatchCard) */}
@@ -990,6 +1005,21 @@ export default function ExtraClassView({
                       </>
                     )}
                   </button>
+
+                  {/* PW Admin Portal Action */}
+                  {item.adminUrl && (
+                    <a
+                      href={item.adminUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      referrerPolicy="no-referrer"
+                      className="py-1.5 sm:py-2 px-3 text-[9px] sm:text-[10px] font-black uppercase tracking-wider bg-slate-900 hover:bg-black text-white rounded-[2px] flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
+                      title={`Open ${item.batchCode} directly in PW Admin portal`}
+                    >
+                      <span>Admin</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  )}
 
                   {/* Mark as Done / Undo Toggle */}
                   <button
