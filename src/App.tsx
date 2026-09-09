@@ -123,9 +123,25 @@ export default function App() {
   const [activeView, setActiveView] = useState<AppView>('batches');
   const [isNavDrawerOpen, setIsNavDrawerOpen] = useState<boolean>(false);
 
-  const [user, setUser] = useState<any | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [needsAuth, setNeedsAuth] = useState(false);
+  const [user, setUser] = useState<any | null>(() => {
+    try {
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('pb_auth_user') : null;
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [token, setToken] = useState<string | null>(() => {
+    try {
+      return typeof window !== 'undefined' ? localStorage.getItem('pb_google_access_token') : null;
+    } catch {
+      return null;
+    }
+  });
+  const [needsAuth, setNeedsAuth] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return !localStorage.getItem('pb_google_access_token');
+  });
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
   // Spreadsheet state
@@ -238,18 +254,30 @@ export default function App() {
 
   // 1. Initialize Auth on mount
   useEffect(() => {
-    setIsLoading(true);
+    const savedToken = typeof window !== 'undefined' ? localStorage.getItem('pb_google_access_token') : null;
+    if (savedToken) {
+      setNeedsAuth(false);
+      fetchBatches(savedToken);
+    } else {
+      setIsLoading(true);
+    }
+
     const unsubscribe = initAuth(
       (currentUser, accessToken) => {
         setUser(currentUser);
         setToken(accessToken);
         setNeedsAuth(false);
         setIsLoading(false);
-        // Load initial sheets data
-        fetchBatches(accessToken);
+        // Load initial sheets data if not already loaded with savedToken
+        if (!savedToken) {
+          fetchBatches(accessToken);
+        }
       },
       () => {
-        setNeedsAuth(true);
+        const checkToken = typeof window !== 'undefined' ? localStorage.getItem('pb_google_access_token') : null;
+        if (!checkToken) {
+          setNeedsAuth(true);
+        }
         setIsLoading(false);
       }
     );
@@ -319,7 +347,11 @@ export default function App() {
         }
       });
       if (!res.ok) {
-        const errData = await res.json();
+        const errData = await res.json().catch(() => ({}));
+        if (res.status === 401 || (errData.error && (errData.error.includes("Authorization") || errData.error.includes("invalid_grant") || errData.error.includes("expired")))) {
+          setNeedsAuth(true);
+          throw new Error("Your Google session has expired. Please click 'Sign in with Google' to reconnect.");
+        }
         throw new Error(errData.error || 'Failed to load spreadsheet data.');
       }
       const data = await res.json();
