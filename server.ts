@@ -229,6 +229,12 @@ app.use((req, _res, next) => {
   const rawDbCache = new Map<string, CachedRawDb>();
   const RAW_DB_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes TTL
   const spreadsheetTitleCache = new Map<string, string>();
+  const PUBLISHED_TIMETABLE_CSV_SOURCES: Record<string, { title: string; url: string }> = {
+    TC: {
+      title: "TC Raw_DB (published CSV)",
+      url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYz_RE56iI12cRH3jG2SLwwpGyS7-DRgVQ-W97mRyVvf-jNRdMsGW0lieGE7myHzLI3kdkA1DLJi9i/pub?gid=101475223&single=true&output=csv",
+    },
+  };
   const DEFAULT_BATCH_SPREADSHEET_ID = "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
   const DEFAULT_BATCH_WORKSPACES = [
     ["PCMC VP"],
@@ -258,6 +264,43 @@ app.use((req, _res, next) => {
     } catch {
       return null;
     }
+  }
+
+  function hasRawDbLayout(rows: any[][] | null | undefined): boolean {
+    return !!rows?.slice(0, 5).some((row) => {
+      const dayHeader = String(row[0] || "").trim().toLowerCase();
+      const dateHeader = String(row[1] || "").trim().toLowerCase();
+      const batchHeader = String(row[8] || "").trim().toLowerCase();
+      return dayHeader.includes("day") && dateHeader.includes("date") && batchHeader.includes("batch");
+    });
+  }
+
+  function getPublishedTimetableSource(center: string) {
+    return PUBLISHED_TIMETABLE_CSV_SOURCES[(center || "").trim().toUpperCase()] || null;
+  }
+
+  async function fetchPublishedRawDbWithCache(
+    source: { title: string; url: string },
+    forceRefresh = false
+  ): Promise<{ spreadsheetId: string; title: string; rows: any[][] }> {
+    const cacheKey = `published:${source.url}`;
+    const cached = rawDbCache.get(cacheKey);
+    if (!forceRefresh && cached && cached.rows.length > 0 && Date.now() - cached.timestamp < RAW_DB_CACHE_TTL_MS) {
+      return { spreadsheetId: cacheKey, title: cached.title, rows: cached.rows };
+    }
+
+    const response = await fetch(source.url);
+    if (!response.ok) throw new Error(`Published timetable request failed: HTTP ${response.status}`);
+    const rows = parseCsvRows(await response.text());
+    if (!hasRawDbLayout(rows)) throw new Error("Published timetable does not have the expected Raw_DB columns.");
+
+    rawDbCache.set(cacheKey, {
+      spreadsheetId: cacheKey,
+      title: source.title,
+      rows,
+      timestamp: Date.now(),
+    });
+    return { spreadsheetId: cacheKey, title: source.title, rows };
   }
 
   /**
@@ -310,13 +353,7 @@ app.use((req, _res, next) => {
     // sheets.googleapis.com read quota that the app previously exhausted.
     try {
       const csvRows = await fetchSheetCsv(spreadsheetId, "Raw_DB", authToken);
-      const hasRawDbLayout = csvRows?.slice(0, 5).some((row) => {
-        const dayHeader = String(row[0] || "").trim().toLowerCase();
-        const dateHeader = String(row[1] || "").trim().toLowerCase();
-        const batchHeader = String(row[8] || "").trim().toLowerCase();
-        return dayHeader.includes("day") && dateHeader.includes("date") && batchHeader.includes("batch");
-      });
-      if (csvRows && hasRawDbLayout) {
+      if (csvRows && hasRawDbLayout(csvRows)) {
         rawDbCache.set(spreadsheetId, {
           spreadsheetId,
           title: spreadsheetTitle,
@@ -2344,9 +2381,28 @@ app.use((req, _res, next) => {
       let foundLectures: any[] = [];
       let resolvedCenter = center || "";
 
+      // A published source is the preferred route for a center. It is public,
+      // needs no user OAuth token, and never consumes Sheets API read quota.
+      const publishedSource = getPublishedTimetableSource(center);
+      if (!searchAll && publishedSource) {
+        try {
+          const published = await fetchPublishedRawDbWithCache(publishedSource, forceRefresh);
+          const parsed = parseRawDbRows(published.rows);
+          const matches = parsed.filter((l) => isBatchMatch(l.batchCode, l.batchFaculty, batchCode));
+          if (matches.length > 0) {
+            foundLectures = matches;
+            spreadsheetId = published.spreadsheetId;
+            spreadsheetTitle = published.title;
+            resolvedCenter = center;
+          }
+        } catch (publishedErr: any) {
+          console.warn(`Published timetable unavailable for ${center}:`, publishedErr.message);
+        }
+      }
+
       // Step 1: If center is specified and searchAll is false, check candidate sheet first
       let candidateId = spreadsheetId;
-      if (!searchAll) {
+      if (!searchAll && foundLectures.length === 0) {
         if (!candidateId && center && centerTimetableMap[center]?.spreadsheetId) {
           candidateId = centerTimetableMap[center].spreadsheetId;
           spreadsheetTitle = centerTimetableMap[center].spreadsheetTitle || "";
