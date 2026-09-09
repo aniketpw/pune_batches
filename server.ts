@@ -110,6 +110,18 @@ app.use((req, _res, next) => {
     "1po8VrTl5DXXwxcJN_evxQRn_5S4oNcxnbObQ5rd2K0w",
   ];
 
+  const TIMETABLE_SHEET_CONFIG: Record<string, { gid?: number }> = {
+    "1U5BGET6T_6vzFdEj1BrktFyeKAUNM3le-d6_QXX3IdE": { gid: 101475223 },
+    "1YRDNMMvsCO8zBzfWP2JA__ewJZqyb8oIUBG8n3evps8": { gid: 1000661459 },
+    "1aUGmqbnCdVIXrmRXwHTItUN6kKTmk0UFuFi5D172NC4": { gid: 1000661459 },
+    "1qsgnhF3JTHPJKYSf19uSj5xtivxIDib1CnwSj-kSioE": { gid: 1000661459 },
+    "1PnpJ7N0VGyn093T3DGxg5DY7RgcEw1sjvJh7ZWhRw20": { gid: 1000661459 },
+    "103nQ5mxTrQFu8fQgppgzQIkOhbIrrY4VN5s3WpFx4p4": { gid: 1000661459 },
+    "1JtBcMmkNwnt2hqNgIEBGwNlcdEN4YziQYAN4j6q3GE0": { gid: 101475223 },
+    "1KbI77PEFsxFqFB1ElUQlqSxz9ixTBevxt7wJPNI8FFU": { gid: 1133308606 },
+    "1po8VrTl5DXXwxcJN_evxQRn_5S4oNcxnbObQ5rd2K0w": { gid: 2078808889 },
+  };
+
   interface CenterTimetableInfo {
     centerName: string;
     spreadsheetId: string;
@@ -218,14 +230,26 @@ app.use((req, _res, next) => {
       }
       const sheetsList = metaRes.data?.sheets || [];
       if (sheetsList.length > 0) {
-        const matchTab = sheetsList.find((s: any) => {
-          const t = (s.properties?.title || "").trim().toLowerCase();
-          return t === "raw_db" || t.includes("raw_db") || t.includes("raw db") || t.includes("raw-db") || t.includes("timetable");
-        });
-        if (matchTab?.properties?.title) {
-          targetSheetTitle = matchTab.properties.title;
-        } else if (sheetsList[0]?.properties?.title) {
-          targetSheetTitle = sheetsList[0].properties.title;
+        // 1. Check if configured specific gid exists for this spreadsheet
+        const targetGid = TIMETABLE_SHEET_CONFIG[spreadsheetId]?.gid;
+        if (targetGid !== undefined) {
+          const gidTab = sheetsList.find((s: any) => s.properties?.sheetId === targetGid);
+          if (gidTab?.properties?.title) {
+            targetSheetTitle = gidTab.properties.title;
+          }
+        }
+
+        // 2. If no targetGid or not found, look for Raw_DB or timetable tab
+        if (!targetSheetTitle || targetSheetTitle === "Raw_DB") {
+          const matchTab = sheetsList.find((s: any) => {
+            const t = (s.properties?.title || "").trim().toLowerCase();
+            return t === "raw_db" || t.includes("raw_db") || t.includes("raw db") || t.includes("raw-db") || t.includes("timetable");
+          });
+          if (matchTab?.properties?.title) {
+            targetSheetTitle = matchTab.properties.title;
+          } else if (sheetsList[0]?.properties?.title) {
+            targetSheetTitle = sheetsList[0].properties.title;
+          }
         }
       }
     } catch (metaErr: any) {
@@ -346,7 +370,7 @@ app.use((req, _res, next) => {
     const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
     const normTodayDay = (todayDayStr || "").trim().toUpperCase().substring(0, 3);
 
-    // 1. Direct date match (e.g. 09-Sep matches 09-Sep)
+    // 1. If row has an explicit date, compare against today's date
     if (normRowDate && normToday) {
       if (normRowDate === normToday || normRowDate.includes(normToday) || normToday.includes(normRowDate)) {
         return true;
@@ -363,9 +387,11 @@ app.use((req, _res, next) => {
           }
         }
       } catch {}
+      // Explicit date is present and does NOT match today -> It is an old or future date!
+      return false;
     }
 
-    // 2. In weekly timetable sheets (Raw_DB), recurring schedule matches by Day-of-Week (e.g. WED matches WED)
+    // 2. Only if NO date is given in the row, match by recurring Day-of-Week (e.g. WED matches WED)
     if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
       return true;
     }
@@ -548,9 +574,70 @@ app.use((req, _res, next) => {
     return deduplicateLectures(result);
   }
 
+  function filterCurrentOrLatestWeekLectures(lectures: any[], todayIso: string): any[] {
+    if (!lectures || lectures.length === 0) return [];
+
+    const currentYear = todayIso.substring(0, 4);
+    const dateMap = new Map<any, string>();
+    const isoDates: string[] = [];
+
+    for (const lec of lectures) {
+      if (lec.lectureDate) {
+        const iso = parseDateToIso(lec.lectureDate, currentYear);
+        if (iso) {
+          dateMap.set(lec, iso);
+          if (!isoDates.includes(iso)) isoDates.push(iso);
+        }
+      }
+    }
+
+    if (isoDates.length === 0) return lectures;
+
+    isoDates.sort();
+
+    const [ty, tm, td] = todayIso.split("-").map(Number);
+    const todayObj = new Date(Date.UTC(ty, tm - 1, td, 12, 0, 0));
+    const dayOfWeek = todayObj.getUTCDay();
+    const diffToMon = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monObj = new Date(todayObj.getTime() + diffToMon * 86400000);
+    const sunObj = new Date(monObj.getTime() + 6 * 86400000);
+
+    const monIso = monObj.toISOString().substring(0, 10);
+    const sunIso = sunObj.toISOString().substring(0, 10);
+
+    // 1. If any lectures belong to current week, return ONLY current week lectures
+    const currentWeekLectures = lectures.filter((lec) => {
+      const iso = dateMap.get(lec);
+      if (!iso) return true;
+      return iso >= monIso && iso <= sunIso;
+    });
+
+    const hasCurrentWeekDates = currentWeekLectures.some((l) => dateMap.has(l));
+    if (hasCurrentWeekDates) {
+      return currentWeekLectures;
+    }
+
+    // 2. Otherwise pick the latest week available in the sheet
+    const latestIso = isoDates[isoDates.length - 1];
+    const [ly, lm, ld] = latestIso.split("-").map(Number);
+    const latestObj = new Date(Date.UTC(ly, lm - 1, ld, 12, 0, 0));
+    const lDay = latestObj.getUTCDay();
+    const lDiffToMon = lDay === 0 ? -6 : 1 - lDay;
+    const latestMon = new Date(latestObj.getTime() + lDiffToMon * 86400000);
+    const latestSun = new Date(latestMon.getTime() + 6 * 86400000);
+
+    const lMonIso = latestMon.toISOString().substring(0, 10);
+    const lSunIso = latestSun.toISOString().substring(0, 10);
+
+    return lectures.filter((lec) => {
+      const iso = dateMap.get(lec);
+      if (!iso) return true;
+      return iso >= lMonIso && iso <= lSunIso;
+    });
+  }
+
   function deduplicateLectures(lectures: any[]): any[] {
-    const seen = new Set<string>();
-    const unique: any[] = [];
+    const seen = new Map<string, any>();
 
     const normalizeTimeKey = (timeStr: string) => {
       if (!timeStr) return "";
@@ -559,34 +646,27 @@ app.use((req, _res, next) => {
       return standardized.replace(/[^A-Z0-9]/gi, "").toUpperCase();
     };
 
-    const normalizeSubjectKey = (sub: string) => {
-      const clean = (sub || "").trim().toUpperCase();
-      if (clean.includes("PHY")) return "PHY";
-      if (clean.includes("CHEM")) return "CHEM";
-      if (clean.includes("MATH")) return "MATH";
-      if (clean.includes("BOT")) return "BOT";
-      if (clean.includes("ZOO")) return "ZOO";
-      if (clean.includes("BIO")) return "BIO";
-      return clean.replace(/[^A-Z0-9]/gi, "");
-    };
-
     for (const lec of lectures) {
       const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
-      const cleanDate = (lec.lectureDate || "").trim().toUpperCase().replace(/[^A-Z0-9]/gi, "");
       const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
-      const cleanSubject = normalizeSubjectKey(lec.subject);
-      const cleanFaculty = (lec.facultyCode || lec.teacherName || "").trim().toUpperCase().replace(/[^A-Z0-9]/gi, "");
       
-      // Primary key checks day, date (if present), time, and subject
-      const key = `${cleanDay}_${cleanDate}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
+      // Slot key checks Day and Time Slot (e.g. WED_0845AM1015AM) to avoid overlapping duplicate lectures
+      const slotKey = `${cleanDay}_${cleanTime}`;
 
-      if (!seen.has(key)) {
-        seen.add(key);
-        unique.push(lec);
+      if (!seen.has(slotKey)) {
+        seen.set(slotKey, lec);
+      } else {
+        const existing = seen.get(slotKey);
+        // Prefer today's confirmed class, or row with teacher email / faculty info
+        if (lec.isToday && !existing.isToday) {
+          seen.set(slotKey, lec);
+        } else if (lec.teacherEmail && !existing.teacherEmail) {
+          seen.set(slotKey, lec);
+        }
       }
     }
 
-    return unique;
+    return Array.from(seen.values());
   }
 
   // API: Get Batches and BMs
@@ -1959,34 +2039,40 @@ app.use((req, _res, next) => {
           })
         );
 
-        // Combine all matching lectures across all sheets so no batch classes are missed
-        const allMatches = results.flatMap((r) => r.matches);
-        if (allMatches.length > 0) {
-          foundLectures = deduplicateLectures(allMatches);
-          const matchedResult = results.find((r) => r.matches.length > 0);
-          if (matchedResult) {
-            spreadsheetId = matchedResult.sId;
-            spreadsheetTitle = matchedResult.title;
+        // Select the single best matching sheet for this batch (avoid cross-center / multi-sheet duplication)
+        let bestResult = results.find(
+          (r) => r.matches.length > 0 && center && doesSheetTitleMatchCenter(r.title, center)
+        );
+        if (!bestResult) {
+          const candidates = results
+            .filter((r) => r.matches.length > 0)
+            .sort((a, b) => b.matches.length - a.matches.length);
+          bestResult = candidates[0];
+        }
 
-            // Determine which center this sheet belongs to
-            const knownCenters = ["PCMC VP", "HADAPSAR", "VIMAN NAGAR VP", "TC", "FC ROAD", "KOTHURD"];
-            for (const [cName, cMap] of Object.entries(centerTimetableMap)) {
-              if (cMap.spreadsheetId === matchedResult.sId) {
-                resolvedCenter = cName;
+        if (bestResult && bestResult.matches.length > 0) {
+          foundLectures = bestResult.matches;
+          spreadsheetId = bestResult.sId;
+          spreadsheetTitle = bestResult.title;
+
+          // Determine which center this sheet belongs to
+          const knownCenters = ["PCMC VP", "HADAPSAR", "VIMAN NAGAR VP", "TC", "FC ROAD", "KOTHURD"];
+          for (const [cName, cMap] of Object.entries(centerTimetableMap)) {
+            if (cMap.spreadsheetId === bestResult.sId) {
+              resolvedCenter = cName;
+              break;
+            }
+          }
+          if (!resolvedCenter) {
+            for (const kc of knownCenters) {
+              if (doesSheetTitleMatchCenter(bestResult.title, kc)) {
+                resolvedCenter = kc;
                 break;
               }
             }
-            if (!resolvedCenter) {
-              for (const kc of knownCenters) {
-                if (doesSheetTitleMatchCenter(matchedResult.title, kc)) {
-                  resolvedCenter = kc;
-                  break;
-                }
-              }
-            }
-            if (!resolvedCenter) {
-              resolvedCenter = matchedResult.title || "Pune Center";
-            }
+          }
+          if (!resolvedCenter) {
+            resolvedCenter = bestResult.title || "Pune Center";
           }
         } else {
           // If no sheet contains this batch, select the best matched sheet for this center
@@ -2121,6 +2207,12 @@ app.use((req, _res, next) => {
         console.warn("Could not query audit sheet for batch-schedule:", auditErr.message);
       }
 
+      // Filter foundLectures to current / latest week so old past weeks (e.g. 2-Sep-2026) are discarded when current week (9-Sep-2026) exists
+      const { now, dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
+      const currentYearStr = String(now.getFullYear());
+      const todayIso = parseDateToIso(todayDate, currentYearStr) || now.toISOString().substring(0, 10);
+      foundLectures = filterCurrentOrLatestWeekLectures(foundLectures, todayIso);
+
       // Deduplicate foundLectures across Raw_DB and Extra Class sheet
       foundLectures = deduplicateLectures(foundLectures);
 
@@ -2137,7 +2229,6 @@ app.use((req, _res, next) => {
         return (a.startTime || "").localeCompare(b.startTime || "");
       });
 
-      const { dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
       const todayLectures = foundLectures.filter((l) => l.isToday);
 
       const daysSet = new Set<string>();

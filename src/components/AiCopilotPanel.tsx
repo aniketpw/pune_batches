@@ -566,11 +566,18 @@ export default function AiCopilotPanel({
     if (scheduleData.todayLectures && scheduleData.todayLectures.length > 0) {
       return scheduleData.todayLectures;
     }
-    // Fallback: match by today's day name (e.g. WED)
+    // Fallback: only match if lecture has NO conflicting date, or matches today's date
     const todayD3 = (scheduleData.todayDay || new Date().toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Kolkata' })).toUpperCase().substring(0, 3);
+    const todayDateStr = scheduleData.todayDate || '';
     return (scheduleData.allLectures || []).filter((l) => {
+      if (l.isToday) return true;
       const d3 = getLectureDay(l);
-      return d3 === todayD3;
+      if (d3 !== todayD3) return false;
+      // If lecture has a date, ensure it is today's date
+      if (l.lectureDate && todayDateStr) {
+        return l.lectureDate.includes(todayDateStr) || todayDateStr.includes(l.lectureDate);
+      }
+      return !l.lectureDate; // only keep undated recurring lectures
     });
   }, [scheduleData, getLectureDay]);
 
@@ -685,7 +692,7 @@ export default function AiCopilotPanel({
             )}
             {lec.lectureDate && (
               <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-[2px] text-[8.5px] font-bold">
-                {lec.lectureDate}
+                {lec.isToday && scheduleData?.todayDate ? scheduleData.todayDate : lec.lectureDate}
               </span>
             )}
           </div>
