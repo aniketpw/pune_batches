@@ -3527,6 +3527,28 @@ var TIMETABLE_SHEET_IDS = [
   "1po8VrTl5DXXwxcJN_evxQRn_5S4oNcxnbObQ5rd2K0w"
 ];
 var centerTimetableMap = {};
+var TIMETABLE_TITLE_CACHE_TTL_MS = 15 * 60 * 1e3;
+var timetableWorkbookTitlesCache = null;
+async function getTimetableWorkbookTitles(sheets) {
+  if (timetableWorkbookTitlesCache && Date.now() - timetableWorkbookTitlesCache.timestamp < TIMETABLE_TITLE_CACHE_TTL_MS) {
+    return timetableWorkbookTitlesCache.data;
+  }
+  const titles = await Promise.all(
+    TIMETABLE_SHEET_IDS.map(async (sId) => {
+      try {
+        const metaRes = await sheets.spreadsheets.get({
+          spreadsheetId: sId,
+          fields: "properties.title"
+        });
+        return { sId, title: metaRes.data?.properties?.title || sId };
+      } catch {
+        return { sId, title: sId };
+      }
+    })
+  );
+  timetableWorkbookTitlesCache = { data: titles, timestamp: Date.now() };
+  return titles;
+}
 function getIstDateInfo() {
   const now = /* @__PURE__ */ new Date();
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -5146,6 +5168,21 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
         candidateId = centerTimetableMap[center].spreadsheetId;
         spreadsheetTitle = centerTimetableMap[center].spreadsheetTitle || "";
       }
+      if (!candidateId && center) {
+        const workbookTitles = await getTimetableWorkbookTitles(sheets);
+        const titleMatch = workbookTitles.find((item) => doesSheetTitleMatchCenter(item.title, center));
+        if (titleMatch) {
+          candidateId = titleMatch.sId;
+          spreadsheetTitle = titleMatch.title;
+          centerTimetableMap[center] = {
+            centerName: center,
+            spreadsheetId: titleMatch.sId,
+            spreadsheetTitle: titleMatch.title,
+            hasRawDb: true,
+            matchedConfidence: "high"
+          };
+        }
+      }
       if (candidateId) {
         try {
           const { title, rows } = await fetchRawDbWithCache(sheets, candidateId, forceRefresh);
@@ -5342,19 +5379,7 @@ app.get("/api/timetable/mappings", async (req, res) => {
     const auth = getGoogleAuth(req);
     const sheets = google.sheets({ version: "v4", auth });
     const centers = req.query.centers?.split(",").filter(Boolean) || [];
-    const sheetsMeta = await Promise.all(
-      TIMETABLE_SHEET_IDS.map(async (sId) => {
-        try {
-          const metaRes = await sheets.spreadsheets.get({
-            spreadsheetId: sId,
-            fields: "properties.title"
-          });
-          return { sId, title: metaRes.data?.properties?.title || sId };
-        } catch {
-          return { sId, title: sId };
-        }
-      })
-    );
+    const sheetsMeta = await getTimetableWorkbookTitles(sheets);
     for (const c of centers) {
       if (!centerTimetableMap[c] || centerTimetableMap[c].matchedConfidence === "unassigned") {
         const match = sheetsMeta.find((meta) => doesSheetTitleMatchCenter(meta.title, c));

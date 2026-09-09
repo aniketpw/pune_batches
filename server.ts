@@ -122,6 +122,39 @@ app.use((req, _res, next) => {
 
   // In-memory mapping of Center Workspaces to Timetable Spreadsheets
   const centerTimetableMap: Record<string, CenterTimetableInfo> = {};
+  const TIMETABLE_TITLE_CACHE_TTL_MS = 15 * 60 * 1000;
+  let timetableWorkbookTitlesCache: { data: { sId: string; title: string }[]; timestamp: number } | null = null;
+
+  /**
+   * Resolve workbook titles without reading any Raw_DB rows. This lets the app
+   * map every workspace to its timetable once, while keeping page load quota
+   * usage low. Raw_DB data is fetched only after a user opens a batch.
+   */
+  async function getTimetableWorkbookTitles(sheets: any): Promise<{ sId: string; title: string }[]> {
+    if (
+      timetableWorkbookTitlesCache &&
+      Date.now() - timetableWorkbookTitlesCache.timestamp < TIMETABLE_TITLE_CACHE_TTL_MS
+    ) {
+      return timetableWorkbookTitlesCache.data;
+    }
+
+    const titles = await Promise.all(
+      TIMETABLE_SHEET_IDS.map(async (sId) => {
+        try {
+          const metaRes = await sheets.spreadsheets.get({
+            spreadsheetId: sId,
+            fields: "properties.title",
+          });
+          return { sId, title: metaRes.data?.properties?.title || sId };
+        } catch {
+          return { sId, title: sId };
+        }
+      })
+    );
+
+    timetableWorkbookTitlesCache = { data: titles, timestamp: Date.now() };
+    return titles;
+  }
 
   function colLetterToIndex(col: string): number {
     let result = 0;
@@ -2179,6 +2212,25 @@ app.use((req, _res, next) => {
           spreadsheetTitle = centerTimetableMap[center].spreadsheetTitle || "";
         }
 
+        // The app may open AI Timetable before its lightweight mapping request
+        // completes. Resolve the workspace title here as a safe fallback so a
+        // known center reads its own Raw_DB instead of scanning all 9 files.
+        if (!candidateId && center) {
+          const workbookTitles = await getTimetableWorkbookTitles(sheets);
+          const titleMatch = workbookTitles.find((item) => doesSheetTitleMatchCenter(item.title, center));
+          if (titleMatch) {
+            candidateId = titleMatch.sId;
+            spreadsheetTitle = titleMatch.title;
+            centerTimetableMap[center] = {
+              centerName: center,
+              spreadsheetId: titleMatch.sId,
+              spreadsheetTitle: titleMatch.title,
+              hasRawDb: true,
+              matchedConfidence: "high",
+            };
+          }
+        }
+
         if (candidateId) {
           try {
             const { title, rows } = await fetchRawDbWithCache(sheets, candidateId, forceRefresh);
@@ -2406,22 +2458,9 @@ app.use((req, _res, next) => {
       const sheets = google.sheets({ version: "v4", auth });
       const centers = (req.query.centers as string)?.split(",").filter(Boolean) || [];
 
-      // Mapping only needs workbook titles. Do not hydrate every Raw_DB here:
-      // that would add a metadata read plus a full values read for each of the
-      // nine workbooks before the user has asked to view a timetable.
-      const sheetsMeta = await Promise.all(
-        TIMETABLE_SHEET_IDS.map(async (sId) => {
-          try {
-            const metaRes = await sheets.spreadsheets.get({
-              spreadsheetId: sId,
-              fields: "properties.title",
-            });
-            return { sId, title: metaRes.data?.properties?.title || sId };
-          } catch {
-            return { sId, title: sId };
-          }
-        })
-      );
+      // Mapping only needs workbook titles; the helper keeps those titles
+      // cached and never hydrates Raw_DB rows during alignment.
+      const sheetsMeta = await getTimetableWorkbookTitles(sheets);
 
       // Attempt smart title matching for centers that don't have an exact match yet
       for (const c of centers) {

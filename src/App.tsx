@@ -359,10 +359,10 @@ export default function App() {
         setActiveTab(keys[0]);
       }
 
-      // Timetable mapping is intentionally loaded only from Settings /
-      // Re-align. Loading all nine Raw_DB workbooks during every app launch
-      // consumed the signed-in user's Sheets read quota before they opened AI
-      // Timetable.
+      // Build the center → timetable map on load, using only cached workbook
+      // titles. This makes every center's AI timetable query its own Raw_DB
+      // first without preloading any timetable rows.
+      fetchTimetableMappings(keys, activeToken);
     } catch (err: any) {
       console.error(err);
       setError(err.message || 'Connection error. Please ensure you have permission.');
