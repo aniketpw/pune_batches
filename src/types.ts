@@ -59,6 +59,37 @@ export interface LectureSchedule {
   status: 'upcoming' | 'ongoing' | 'completed';
 }
 
+export interface BatchAuditIssue {
+  id: string;
+  subsheet: string;
+  branch: string;
+  batchName: string;
+  subjectName: string;
+  lecStartTime: string;
+  finalBm: string;
+  errors: string;
+  hasError: boolean;
+}
+
+export interface BatchExtraClassItem {
+  id: string;
+  center: string;
+  batchCode: string;
+  day: string;
+  date: string;
+  timeRange: string;
+  teacherName: string;
+  subject: string;
+  room: string;
+  announcement: string;
+  announcementStatus: string;
+  isDone: boolean;
+  isToday: boolean;
+  isTomorrow: boolean;
+  isUpcoming: boolean;
+  isPast: boolean;
+}
+
 export interface BatchScheduleResponse {
   center: string;
   batchCode: string;
@@ -70,6 +101,8 @@ export interface BatchScheduleResponse {
   allLectures: LectureSchedule[];
   daysAvailable: string[];
   totalWeeklyLectures: number;
+  auditIssues?: BatchAuditIssue[];
+  extraClasses?: BatchExtraClassItem[];
 }
 
 export interface CenterTimetableMapping {

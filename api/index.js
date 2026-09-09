@@ -1144,6 +1144,312 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
   });
   return responsePayload;
 }
+var AUDIT_SPREADSHEET_ID = "1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k";
+var auditSheetCache = /* @__PURE__ */ new Map();
+function isPuneBatchCode(str) {
+  if (!str) return false;
+  const clean = str.trim().toUpperCase();
+  return clean.startsWith("27-") || clean.startsWith("T27") || clean.startsWith("T-27") || clean.startsWith("27 -") || clean.includes("27-") || clean.includes("T27") || clean.includes("T-27") || clean.includes("27 -") || /\b(27-|T27)/i.test(clean);
+}
+function normalizePuneBranchName(branch) {
+  const b = (branch || "").trim();
+  const lower = b.toLowerCase();
+  if (lower.includes("pcmc") || lower.includes("pimpri")) return "PCMC VP";
+  if (lower.includes("hadapsar")) return "HADAPSAR";
+  if (lower.includes("viman")) return "VIMAN NAGAR VP";
+  if (lower.includes("fc") || lower.includes("fergusson")) return "FC ROAD";
+  if (lower.includes("kothrud") || lower.includes("kothurd")) return "KOTHRUD";
+  if (lower.includes("tc") || lower.includes("tuition")) return "TC";
+  return b || "Pune Center";
+}
+function formatAuditDateTime(val) {
+  if (!val) return "";
+  const s = String(val).trim();
+  if (!s) return "";
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const isoMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (isoMatch) {
+    const year = isoMatch[1];
+    const month = parseInt(isoMatch[2], 10) - 1;
+    const day = parseInt(isoMatch[3], 10);
+    const monthStr = monthNames[month] || String(month + 1);
+    const dayStr = day < 10 ? `0${day}` : `${day}`;
+    if (isoMatch[4] !== void 0 && isoMatch[5] !== void 0) {
+      let hour = parseInt(isoMatch[4], 10);
+      const min = isoMatch[5];
+      const ampm = hour >= 12 ? "PM" : "AM";
+      hour = hour % 12;
+      if (hour === 0) hour = 12;
+      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+      return `${dayStr}-${monthStr}-${year} \u2022 ${hourStr}:${min} ${ampm}`;
+    }
+    return `${dayStr}-${monthStr}-${year}`;
+  }
+  const ddmmyyyyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (ddmmyyyyMatch) {
+    const day = parseInt(ddmmyyyyMatch[1], 10);
+    const month = parseInt(ddmmyyyyMatch[2], 10) - 1;
+    const year = ddmmyyyyMatch[3];
+    const monthStr = monthNames[month] || String(month + 1);
+    const dayStr = day < 10 ? `0${day}` : `${day}`;
+    if (ddmmyyyyMatch[4] !== void 0 && ddmmyyyyMatch[5] !== void 0) {
+      let hour = parseInt(ddmmyyyyMatch[4], 10);
+      const min = ddmmyyyyMatch[5];
+      const ampm = hour >= 12 ? "PM" : "AM";
+      hour = hour % 12;
+      if (hour === 0) hour = 12;
+      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+      return `${dayStr}-${monthStr}-${year} \u2022 ${hourStr}:${min} ${ampm}`;
+    }
+    return `${dayStr}-${monthStr}-${year}`;
+  }
+  const timeMatch = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (timeMatch) {
+    let hour = parseInt(timeMatch[1], 10);
+    const min = timeMatch[2];
+    const ampm = hour >= 12 ? "PM" : "AM";
+    hour = hour % 12;
+    if (hour === 0) hour = 12;
+    const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+    return `${hourStr}:${min} ${ampm}`;
+  }
+  return s;
+}
+function isTrivialAuditClean(val) {
+  if (!val) return true;
+  const lower = val.toLowerCase().trim();
+  const cleanKeywords = [
+    "no",
+    "none",
+    "nil",
+    "ok",
+    "clean",
+    "done",
+    "na",
+    "n/a",
+    "-",
+    "--",
+    "false",
+    "true",
+    "no issue",
+    "no issues",
+    "no error",
+    "no errors",
+    "all ok",
+    "good",
+    "resolved",
+    "completed",
+    "yes",
+    "none reported"
+  ];
+  return cleanKeywords.includes(lower);
+}
+function isExplicitAuditIssue(val) {
+  if (!val || isTrivialAuditClean(val)) return false;
+  const lower = val.toLowerCase();
+  const problemKeywords = [
+    "wrong",
+    "issue",
+    "error",
+    "not uploaded",
+    "missing",
+    "delay",
+    "fault",
+    "problem",
+    "incorrect",
+    "pendency",
+    "pending",
+    "failed",
+    "reschedule",
+    "cancel",
+    "mismatch",
+    "defect",
+    "quiz"
+  ];
+  return problemKeywords.some((kw) => lower.includes(kw));
+}
+async function fetchAuditSheetWithCache(sheets, forceRefresh = false) {
+  const cacheKey = `audit-sheet-${AUDIT_SPREADSHEET_ID}`;
+  const cached = auditSheetCache.get(cacheKey);
+  if (!forceRefresh && cached && Date.now() - cached.timestamp < 3 * 60 * 1e3) {
+    return cached.data;
+  }
+  if (!sheets) {
+    if (cached && cached.data) return cached.data;
+    return { records: [], totalPuneCount: 0, errorCount: 0, branches: [], subsheets: [] };
+  }
+  const metaRes = await sheets.spreadsheets.get({
+    spreadsheetId: AUDIT_SPREADSHEET_ID
+  });
+  const allSheets = metaRes.data.sheets || [];
+  const spreadsheetTitle = metaRes.data.properties?.title || "Audit Sheet";
+  const TARGET_SUBSHEETS = ["pendency", "topic", "video", "notes", "content", "teacher"];
+  const matchedSheets = allSheets.filter((s) => {
+    const title = (s.properties?.title || "").trim().toLowerCase();
+    return TARGET_SUBSHEETS.some((target) => title.includes(target));
+  });
+  const sheetsToQuery = matchedSheets.length > 0 ? matchedSheets : allSheets.slice(0, 8);
+  const sheetDataResults = await Promise.all(
+    sheetsToQuery.map(async (sheet) => {
+      const sheetTitle = sheet.properties?.title || "Sheet1";
+      try {
+        const valRes = await sheets.spreadsheets.values.get({
+          spreadsheetId: AUDIT_SPREADSHEET_ID,
+          range: `'${sheetTitle}'!A1:ZZ`
+        });
+        return {
+          sheetTitle,
+          rows: valRes.data.values || []
+        };
+      } catch (err) {
+        console.warn(`[Audit Sheet] Error fetching sheet '${sheetTitle}':`, err.message);
+        return { sheetTitle, rows: [] };
+      }
+    })
+  );
+  const allPuneRecords = [];
+  const branchesSet = /* @__PURE__ */ new Set();
+  const subsheetsFound = [];
+  for (const { sheetTitle, rows } of sheetDataResults) {
+    if (!rows || rows.length < 2) continue;
+    subsheetsFound.push(sheetTitle);
+    let headerRowIndex = 0;
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+      const nonEmpty = (rows[i] || []).filter((c) => String(c || "").trim() !== "");
+      if (nonEmpty.length >= 2) {
+        headerRowIndex = i;
+        break;
+      }
+    }
+    const headerRow = (rows[headerRowIndex] || []).map((h) => String(h || "").trim());
+    let branchIdx = -1;
+    let batchIdx = -1;
+    let subjectIdx = -1;
+    let timeIdx = -1;
+    let bmIdx = -1;
+    const issueColIndices = [];
+    const statusColIndices = [];
+    headerRow.forEach((colHeader, idx) => {
+      const rawH = colHeader.toLowerCase().trim();
+      const hAlpha = rawH.replace(/[^a-z0-9]/g, "");
+      const hSpaced = rawH.replace(/[^a-z0-9]/g, " ");
+      if (branchIdx === -1 && (hAlpha.includes("branch") || hAlpha.includes("center") || hAlpha.includes("centre") || hAlpha.includes("location"))) {
+        branchIdx = idx;
+      } else if (batchIdx === -1 && (hAlpha.includes("batchname") || hAlpha.includes("batchcode") || hAlpha.includes("batch") && !hAlpha.includes("manager") && !hAlpha.includes("bm"))) {
+        batchIdx = idx;
+      } else if (subjectIdx === -1 && (hAlpha.includes("subjectname") || hAlpha.includes("subject") || hAlpha === "sub")) {
+        subjectIdx = idx;
+      } else if (timeIdx === -1 && (hAlpha.includes("lecstart") || hAlpha.includes("starttime") || hAlpha.includes("lectime") || hAlpha.includes("startdate") || hAlpha.includes("lecdate") || hSpaced.includes("lec start") || hSpaced.includes("start time") || hSpaced.includes("lecture time") || hSpaced.includes("in time") || hAlpha === "time" || hAlpha === "timing" || hAlpha.includes("slot"))) {
+        timeIdx = idx;
+      } else if (bmIdx === -1 && (hAlpha.includes("finalbm") || hAlpha.includes("batchmanager") || hAlpha === "bm" || hAlpha.includes("bmname") || hAlpha.includes("manager") && !hAlpha.includes("batch"))) {
+        bmIdx = idx;
+      }
+      if (hAlpha.includes("issue") || hAlpha.includes("error") || hAlpha.includes("remark") || hAlpha.includes("problem") || hAlpha.includes("pendency") || hAlpha.includes("defect")) {
+        issueColIndices.push(idx);
+      } else if (hAlpha.includes("status") || hAlpha.includes("verification") || hAlpha.includes("audit") || hAlpha.includes("uploaded") || hAlpha.includes("notes") || hAlpha.includes("video")) {
+        statusColIndices.push(idx);
+      }
+    });
+    for (let r = headerRowIndex + 1; r < rows.length; r++) {
+      const row = rows[r] || [];
+      if (!row || row.length === 0) continue;
+      const rawBranch = branchIdx >= 0 ? String(row[branchIdx] || "").trim() : "";
+      let rawBatch = batchIdx >= 0 ? String(row[batchIdx] || "").trim() : "";
+      let finalBatchName = "";
+      if (isPuneBatchCode(rawBatch)) {
+        finalBatchName = rawBatch;
+      } else {
+        for (let c = 0; c < row.length; c++) {
+          const cellStr = String(row[c] || "").trim();
+          if (isPuneBatchCode(cellStr)) {
+            finalBatchName = cellStr;
+            break;
+          }
+        }
+      }
+      if (!finalBatchName) continue;
+      let normalizedBranch = "";
+      const batchUpper = finalBatchName.toUpperCase();
+      if (batchUpper.startsWith("T27") || batchUpper.includes("T27")) {
+        normalizedBranch = "TC";
+      } else if (rawBranch && rawBranch.toLowerCase() !== "pune") {
+        normalizedBranch = normalizePuneBranchName(rawBranch);
+      } else {
+        normalizedBranch = "Pune Center";
+      }
+      branchesSet.add(normalizedBranch);
+      const rawSubject = subjectIdx >= 0 ? String(row[subjectIdx] || "").trim() : "";
+      const rawTime = timeIdx >= 0 ? String(row[timeIdx] || "").trim() : "";
+      const formattedLecTime = formatAuditDateTime(rawTime);
+      const rawBm = bmIdx >= 0 ? String(row[bmIdx] || "").trim() : "";
+      const gatheredIssues = [];
+      for (const idx of issueColIndices) {
+        const val = String(row[idx] || "").trim();
+        if (val && !isTrivialAuditClean(val)) {
+          if (!gatheredIssues.some((g) => g.toLowerCase() === val.toLowerCase())) {
+            gatheredIssues.push(val);
+          }
+        }
+      }
+      if (gatheredIssues.length === 0) {
+        for (const idx of statusColIndices) {
+          const val = String(row[idx] || "").trim();
+          if (val && !isTrivialAuditClean(val)) {
+            if (!gatheredIssues.some((g) => g.toLowerCase() === val.toLowerCase())) {
+              gatheredIssues.push(val);
+            }
+          }
+        }
+      }
+      if (gatheredIssues.length === 0) {
+        for (let c = 0; c < row.length; c++) {
+          if (c === branchIdx || c === batchIdx || c === subjectIdx || c === timeIdx || c === bmIdx) continue;
+          const cellVal = String(row[c] || "").trim();
+          if (cellVal && isExplicitAuditIssue(cellVal)) {
+            gatheredIssues.push(cellVal);
+            break;
+          }
+        }
+      }
+      const rawError = gatheredIssues.join(" \u2022 ");
+      const hasError = gatheredIssues.length > 0;
+      const rawRowObj = {};
+      headerRow.forEach((colHeader, colIdx) => {
+        const key = colHeader || `Column_${colIdx + 1}`;
+        rawRowObj[key] = String(row[colIdx] || "").trim();
+      });
+      allPuneRecords.push({
+        id: `${sheetTitle}_${r + 1}`,
+        subsheet: sheetTitle,
+        branch: normalizedBranch,
+        batchName: finalBatchName,
+        subjectName: rawSubject,
+        lecStartTime: formattedLecTime || rawTime,
+        finalBm: rawBm,
+        errors: rawError,
+        hasError,
+        rowIndex: r + 1,
+        rawRow: rawRowObj
+      });
+    }
+  }
+  const totalPuneCount = allPuneRecords.length;
+  const errorCount = allPuneRecords.filter((r) => r.hasError).length;
+  const payload = {
+    spreadsheetId: AUDIT_SPREADSHEET_ID,
+    spreadsheetTitle,
+    subsheets: subsheetsFound,
+    totalPuneCount,
+    errorCount,
+    branches: Array.from(branchesSet).sort(),
+    records: allPuneRecords
+  };
+  auditSheetCache.set(cacheKey, {
+    data: payload,
+    timestamp: Date.now()
+  });
+  return payload;
+}
 app.get("/api/timetable/batch-schedule", async (req, res) => {
   try {
     const auth = getGoogleAuth(req);
@@ -1233,14 +1539,34 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
         }
       }
     }
+    let matchingExtraClasses = [];
     try {
       const extraPayload = await fetchAllExtraClassLectures(sheets, forceRefresh);
-      const matchingExtra = (extraPayload.classes || []).filter(
-        (ec) => isBatchMatch(ec.batchCode, ec.facultyCode, batchCode) && (!ec.isPast || ec.isToday)
+      const allMatchingExtra = (extraPayload.classes || []).filter(
+        (ec) => isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
       );
-      if (matchingExtra.length > 0) {
+      matchingExtraClasses = allMatchingExtra.map((ec) => ({
+        id: ec.id,
+        center: ec.center,
+        batchCode: ec.batchCode,
+        day: ec.day,
+        date: ec.displayDate || ec.rawDate,
+        timeRange: ec.timeRange,
+        teacherName: ec.teacherName || ec.facultyCode || "Faculty",
+        subject: ec.subject || "Extra Lecture",
+        room: ec.room || "Room TBA",
+        announcement: ec.announcement || "",
+        announcementStatus: ec.rawStatus || (ec.isDone ? "Done" : "Pending"),
+        isDone: !!ec.isDone,
+        isToday: !!ec.isToday,
+        isTomorrow: !!ec.isTomorrow,
+        isUpcoming: !!ec.isUpcoming,
+        isPast: !!ec.isPast
+      }));
+      const activeExtra = allMatchingExtra.filter((ec) => !ec.isPast || ec.isToday);
+      if (activeExtra.length > 0) {
         const { now } = getIstDateInfo();
-        for (const ec of matchingExtra) {
+        for (const ec of activeExtra) {
           const extraLecture = {
             day: ec.day || "Scheduled",
             lectureDate: ec.displayDate || ec.rawDate || "",
@@ -1262,8 +1588,8 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
           };
           foundLectures.push(extraLecture);
         }
-        if (!resolvedCenter && matchingExtra[0]?.center) {
-          resolvedCenter = matchingExtra[0].center;
+        if (!resolvedCenter && activeExtra[0]?.center) {
+          resolvedCenter = activeExtra[0].center;
         }
         if (!spreadsheetTitle) {
           spreadsheetTitle = "Raw_DB & Extra Class Sheet";
@@ -1271,6 +1597,27 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       }
     } catch (extraErr) {
       console.warn("Could not query extra class sheet for batch-schedule:", extraErr.message);
+    }
+    let matchingAuditIssues = [];
+    try {
+      if (sheets) {
+        const auditPayload = await fetchAuditSheetWithCache(sheets, forceRefresh);
+        if (auditPayload && Array.isArray(auditPayload.records)) {
+          matchingAuditIssues = auditPayload.records.filter((r) => isBatchMatch(r.batchName, "", batchCode)).map((r) => ({
+            id: r.id,
+            subsheet: r.subsheet,
+            branch: r.branch,
+            batchName: r.batchName,
+            subjectName: r.subjectName,
+            lecStartTime: r.lecStartTime,
+            finalBm: r.finalBm,
+            errors: r.errors || "Issue pending verification",
+            hasError: !!r.hasError
+          }));
+        }
+      }
+    } catch (auditErr) {
+      console.warn("Could not query audit sheet for batch-schedule:", auditErr.message);
     }
     foundLectures = deduplicateLectures(foundLectures);
     const dayWeight = {
@@ -1306,7 +1653,9 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       todayLectures,
       allLectures: foundLectures,
       daysAvailable: Array.from(daysSet),
-      totalWeeklyLectures: foundLectures.length
+      totalWeeklyLectures: foundLectures.length,
+      extraClasses: matchingExtraClasses,
+      auditIssues: matchingAuditIssues
     });
   } catch (error) {
     console.error("API Error (batch-schedule):", error);
@@ -1612,315 +1961,12 @@ app.post("/api/extra-classes/mark-done", async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to mark extra class status in Google Sheets." });
   }
 });
-var AUDIT_SPREADSHEET_ID = "1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k";
-var auditSheetCache = /* @__PURE__ */ new Map();
-function isPuneBatchCode(str) {
-  if (!str) return false;
-  const clean = str.trim().toUpperCase();
-  return clean.startsWith("27-") || clean.startsWith("T27") || clean.startsWith("T-27") || clean.startsWith("27 -") || clean.includes("27-") || clean.includes("T27") || clean.includes("T-27") || clean.includes("27 -") || /\b(27-|T27)/i.test(clean);
-}
-function normalizePuneBranchName(branch) {
-  const b = (branch || "").trim();
-  const lower = b.toLowerCase();
-  if (lower.includes("pcmc") || lower.includes("pimpri")) return "PCMC VP";
-  if (lower.includes("hadapsar")) return "HADAPSAR";
-  if (lower.includes("viman")) return "VIMAN NAGAR VP";
-  if (lower.includes("fc") || lower.includes("fergusson")) return "FC ROAD";
-  if (lower.includes("kothrud") || lower.includes("kothurd")) return "KOTHRUD";
-  if (lower.includes("tc") || lower.includes("tuition")) return "TC";
-  return b || "Pune Center";
-}
-function formatAuditDateTime(val) {
-  if (!val) return "";
-  const s = String(val).trim();
-  if (!s) return "";
-  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const isoMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-  if (isoMatch) {
-    const year = isoMatch[1];
-    const month = parseInt(isoMatch[2], 10) - 1;
-    const day = parseInt(isoMatch[3], 10);
-    const monthStr = monthNames[month] || String(month + 1);
-    const dayStr = day < 10 ? `0${day}` : `${day}`;
-    if (isoMatch[4] !== void 0 && isoMatch[5] !== void 0) {
-      let hour = parseInt(isoMatch[4], 10);
-      const min = isoMatch[5];
-      const ampm = hour >= 12 ? "PM" : "AM";
-      hour = hour % 12;
-      if (hour === 0) hour = 12;
-      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
-      return `${dayStr}-${monthStr}-${year} \u2022 ${hourStr}:${min} ${ampm}`;
-    }
-    return `${dayStr}-${monthStr}-${year}`;
-  }
-  const ddmmyyyyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-  if (ddmmyyyyMatch) {
-    const day = parseInt(ddmmyyyyMatch[1], 10);
-    const month = parseInt(ddmmyyyyMatch[2], 10) - 1;
-    const year = ddmmyyyyMatch[3];
-    const monthStr = monthNames[month] || String(month + 1);
-    const dayStr = day < 10 ? `0${day}` : `${day}`;
-    if (ddmmyyyyMatch[4] !== void 0 && ddmmyyyyMatch[5] !== void 0) {
-      let hour = parseInt(ddmmyyyyMatch[4], 10);
-      const min = ddmmyyyyMatch[5];
-      const ampm = hour >= 12 ? "PM" : "AM";
-      hour = hour % 12;
-      if (hour === 0) hour = 12;
-      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
-      return `${dayStr}-${monthStr}-${year} \u2022 ${hourStr}:${min} ${ampm}`;
-    }
-    return `${dayStr}-${monthStr}-${year}`;
-  }
-  const timeMatch = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
-  if (timeMatch) {
-    let hour = parseInt(timeMatch[1], 10);
-    const min = timeMatch[2];
-    const ampm = hour >= 12 ? "PM" : "AM";
-    hour = hour % 12;
-    if (hour === 0) hour = 12;
-    const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
-    return `${hourStr}:${min} ${ampm}`;
-  }
-  return s;
-}
-function isTrivialAuditClean(val) {
-  if (!val) return true;
-  const lower = val.toLowerCase().trim();
-  const cleanKeywords = [
-    "no",
-    "none",
-    "nil",
-    "ok",
-    "clean",
-    "done",
-    "na",
-    "n/a",
-    "-",
-    "--",
-    "false",
-    "true",
-    "no issue",
-    "no issues",
-    "no error",
-    "no errors",
-    "all ok",
-    "good",
-    "resolved",
-    "completed",
-    "yes",
-    "none reported"
-  ];
-  return cleanKeywords.includes(lower);
-}
-function isExplicitAuditIssue(val) {
-  if (!val || isTrivialAuditClean(val)) return false;
-  const lower = val.toLowerCase();
-  const problemKeywords = [
-    "wrong",
-    "issue",
-    "error",
-    "not uploaded",
-    "missing",
-    "delay",
-    "fault",
-    "problem",
-    "incorrect",
-    "pendency",
-    "pending",
-    "failed",
-    "reschedule",
-    "cancel",
-    "mismatch",
-    "defect",
-    "quiz"
-  ];
-  return problemKeywords.some((kw) => lower.includes(kw));
-}
 app.get("/api/audit-sheet", async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === "true";
-    const cacheKey = `audit-sheet-${AUDIT_SPREADSHEET_ID}`;
-    const cached = auditSheetCache.get(cacheKey);
-    if (!forceRefresh && cached && Date.now() - cached.timestamp < 3 * 60 * 1e3) {
-      return res.json(cached.data);
-    }
     const auth = getGoogleAuth(req);
     const sheets = google.sheets({ version: "v4", auth });
-    const metaRes = await sheets.spreadsheets.get({
-      spreadsheetId: AUDIT_SPREADSHEET_ID
-    });
-    const allSheets = metaRes.data.sheets || [];
-    const spreadsheetTitle = metaRes.data.properties?.title || "Audit Sheet";
-    const TARGET_SUBSHEETS = ["pendency", "topic", "video", "notes", "content", "teacher"];
-    const matchedSheets = allSheets.filter((s) => {
-      const title = (s.properties?.title || "").trim().toLowerCase();
-      return TARGET_SUBSHEETS.some((target) => title.includes(target));
-    });
-    const sheetsToQuery = matchedSheets.length > 0 ? matchedSheets : allSheets.slice(0, 8);
-    const sheetDataResults = await Promise.all(
-      sheetsToQuery.map(async (sheet) => {
-        const sheetTitle = sheet.properties?.title || "Sheet1";
-        try {
-          const valRes = await sheets.spreadsheets.values.get({
-            spreadsheetId: AUDIT_SPREADSHEET_ID,
-            range: `'${sheetTitle}'!A1:ZZ`
-          });
-          return {
-            sheetTitle,
-            rows: valRes.data.values || []
-          };
-        } catch (err) {
-          console.warn(`[Audit Sheet] Error fetching sheet '${sheetTitle}':`, err.message);
-          return { sheetTitle, rows: [] };
-        }
-      })
-    );
-    const allPuneRecords = [];
-    const branchesSet = /* @__PURE__ */ new Set();
-    const subsheetsFound = [];
-    for (const { sheetTitle, rows } of sheetDataResults) {
-      if (!rows || rows.length < 2) continue;
-      subsheetsFound.push(sheetTitle);
-      let headerRowIndex = 0;
-      for (let i = 0; i < Math.min(rows.length, 10); i++) {
-        const nonEmpty = (rows[i] || []).filter((c) => String(c || "").trim() !== "");
-        if (nonEmpty.length >= 2) {
-          headerRowIndex = i;
-          break;
-        }
-      }
-      const headerRow = (rows[headerRowIndex] || []).map((h) => String(h || "").trim());
-      let branchIdx = -1;
-      let batchIdx = -1;
-      let subjectIdx = -1;
-      let timeIdx = -1;
-      let bmIdx = -1;
-      const issueColIndices = [];
-      const statusColIndices = [];
-      headerRow.forEach((colHeader, idx) => {
-        const rawH = colHeader.toLowerCase().trim();
-        const hAlpha = rawH.replace(/[^a-z0-9]/g, "");
-        const hSpaced = rawH.replace(/[^a-z0-9]/g, " ");
-        if (branchIdx === -1 && (hAlpha.includes("branch") || hAlpha.includes("center") || hAlpha.includes("centre") || hAlpha.includes("location"))) {
-          branchIdx = idx;
-        } else if (batchIdx === -1 && (hAlpha.includes("batchname") || hAlpha.includes("batchcode") || hAlpha.includes("batch") && !hAlpha.includes("manager") && !hAlpha.includes("bm"))) {
-          batchIdx = idx;
-        } else if (subjectIdx === -1 && (hAlpha.includes("subjectname") || hAlpha.includes("subject") || hAlpha === "sub")) {
-          subjectIdx = idx;
-        } else if (timeIdx === -1 && (hAlpha.includes("lecstart") || hAlpha.includes("starttime") || hAlpha.includes("lectime") || hAlpha.includes("startdate") || hAlpha.includes("lecdate") || hSpaced.includes("lec start") || hSpaced.includes("start time") || hSpaced.includes("lecture time") || hSpaced.includes("in time") || hAlpha === "time" || hAlpha === "timing" || hAlpha.includes("slot"))) {
-          timeIdx = idx;
-        } else if (bmIdx === -1 && (hAlpha.includes("finalbm") || hAlpha.includes("batchmanager") || hAlpha === "bm" || hAlpha.includes("bmname") || hAlpha.includes("manager") && !hAlpha.includes("batch"))) {
-          bmIdx = idx;
-        }
-        if (hAlpha.includes("issue") || hAlpha.includes("error") || hAlpha.includes("remark") || hAlpha.includes("wrong") || hAlpha.includes("quiz") || hAlpha.includes("pendency") || hAlpha.includes("problem") || hAlpha.includes("reason") || hAlpha.includes("comment") || hAlpha.includes("note") || hAlpha.includes("defect") || hAlpha.includes("fault") || hAlpha.includes("audit")) {
-          issueColIndices.push(idx);
-        } else if (hAlpha.includes("status")) {
-          statusColIndices.push(idx);
-        }
-      });
-      if (branchIdx === -1) branchIdx = 0;
-      if (batchIdx === -1) batchIdx = 1;
-      if (subjectIdx === -1) subjectIdx = 2;
-      for (let r = headerRowIndex + 1; r < rows.length; r++) {
-        const row = rows[r] || [];
-        if (row.length === 0) continue;
-        let rawBranch = String(row[branchIdx] || "").trim();
-        let rawBatch = String(row[batchIdx] || "").trim();
-        if (!rawBranch && !rawBatch) continue;
-        if (rawBranch.toLowerCase().includes("branch") && rawBatch.toLowerCase().includes("batch")) continue;
-        let finalBatchName = isPuneBatchCode(rawBatch) ? rawBatch : "";
-        if (!finalBatchName) {
-          for (let c = 0; c < row.length; c++) {
-            const cellStr = String(row[c] || "").trim();
-            if (isPuneBatchCode(cellStr)) {
-              finalBatchName = cellStr;
-              break;
-            }
-          }
-        }
-        if (!finalBatchName) {
-          continue;
-        }
-        let normalizedBranch = "";
-        const batchUpper = finalBatchName.toUpperCase();
-        if (batchUpper.startsWith("T27") || batchUpper.includes("T27")) {
-          normalizedBranch = "TC";
-        } else if (rawBranch && rawBranch.toLowerCase() !== "pune") {
-          normalizedBranch = normalizePuneBranchName(rawBranch);
-        } else {
-          normalizedBranch = "Pune Center";
-        }
-        branchesSet.add(normalizedBranch);
-        const rawSubject = subjectIdx >= 0 ? String(row[subjectIdx] || "").trim() : "";
-        const rawTime = timeIdx >= 0 ? String(row[timeIdx] || "").trim() : "";
-        const formattedLecTime = formatAuditDateTime(rawTime);
-        const rawBm = bmIdx >= 0 ? String(row[bmIdx] || "").trim() : "";
-        const gatheredIssues = [];
-        for (const idx of issueColIndices) {
-          const val = String(row[idx] || "").trim();
-          if (val && !isTrivialAuditClean(val)) {
-            if (!gatheredIssues.some((g) => g.toLowerCase() === val.toLowerCase())) {
-              gatheredIssues.push(val);
-            }
-          }
-        }
-        if (gatheredIssues.length === 0) {
-          for (const idx of statusColIndices) {
-            const val = String(row[idx] || "").trim();
-            if (val && !isTrivialAuditClean(val)) {
-              if (!gatheredIssues.some((g) => g.toLowerCase() === val.toLowerCase())) {
-                gatheredIssues.push(val);
-              }
-            }
-          }
-        }
-        if (gatheredIssues.length === 0) {
-          for (let c = 0; c < row.length; c++) {
-            if (c === branchIdx || c === batchIdx || c === subjectIdx || c === timeIdx || c === bmIdx) continue;
-            const cellVal = String(row[c] || "").trim();
-            if (cellVal && isExplicitAuditIssue(cellVal)) {
-              gatheredIssues.push(cellVal);
-              break;
-            }
-          }
-        }
-        const rawError = gatheredIssues.join(" \u2022 ");
-        const hasError = gatheredIssues.length > 0;
-        const rawRowObj = {};
-        headerRow.forEach((colHeader, colIdx) => {
-          const key = colHeader || `Column_${colIdx + 1}`;
-          rawRowObj[key] = String(row[colIdx] || "").trim();
-        });
-        allPuneRecords.push({
-          id: `${sheetTitle}_${r + 1}`,
-          subsheet: sheetTitle,
-          branch: normalizedBranch,
-          batchName: finalBatchName,
-          subjectName: rawSubject,
-          lecStartTime: formattedLecTime || rawTime,
-          finalBm: rawBm,
-          errors: rawError,
-          hasError,
-          rowIndex: r + 1,
-          rawRow: rawRowObj
-        });
-      }
-    }
-    const totalPuneCount = allPuneRecords.length;
-    const errorCount = allPuneRecords.filter((r) => r.hasError).length;
-    const payload = {
-      spreadsheetId: AUDIT_SPREADSHEET_ID,
-      spreadsheetTitle,
-      subsheets: subsheetsFound,
-      totalPuneCount,
-      errorCount,
-      branches: Array.from(branchesSet).sort(),
-      records: allPuneRecords
-    };
-    auditSheetCache.set(cacheKey, {
-      data: payload,
-      timestamp: Date.now()
-    });
+    const payload = await fetchAuditSheetWithCache(sheets, forceRefresh);
     res.json(payload);
   } catch (err) {
     console.error("API Error (/api/audit-sheet):", err);
@@ -1928,7 +1974,7 @@ app.get("/api/audit-sheet", async (req, res) => {
   }
 });
 app.post("/api/ai/explain", async (req, res) => {
-  const { batchCode, tabName, category, phase, timeSlot, bmEmail, todayLectures, allLectures } = req.body || {};
+  const { batchCode, tabName, category, phase, timeSlot, bmEmail, todayLectures, allLectures, auditIssues, extraClasses } = req.body || {};
   if (!batchCode) {
     return res.status(400).json({ error: "Batch Code is required" });
   }
@@ -1952,6 +1998,28 @@ Upcoming scheduled classes:
     scheduleContext = `
 *(Note: No live timetable rows found for ${batchCode} in ${tabName || "Center"} 'Raw_DB' subsheet.)*`;
   }
+  let auditContext = "";
+  if (Array.isArray(auditIssues) && auditIssues.length > 0) {
+    auditContext = `
+### \u26A0\uFE0F AUDIT ISSUES & PENDENCY RECORDED (${auditIssues.length}):
+` + auditIssues.map(
+      (iss, i) => `- **Issue ${i + 1} [${iss.subsheet || "Audit"}]**: Date/Time: **${iss.lecStartTime || "Recent"}** | Subject: **${iss.subjectName || "N/A"}** | Issue: **${iss.errors}** | Assigned BM: **${iss.finalBm || "N/A"}**`
+    ).join("\n");
+  } else {
+    auditContext = `
+### \u2705 AUDIT STATUS: No audit errors or pendency recorded for this batch.`;
+  }
+  let extraClassContext = "";
+  if (Array.isArray(extraClasses) && extraClasses.length > 0) {
+    extraClassContext = `
+### \u{1F4CC} EXTRA CLASSES & ANNOUNCEMENT STATUS (${extraClasses.length}):
+` + extraClasses.map(
+      (ec, i) => `- **Extra Lecture ${i + 1} (${ec.date} \u2022 ${ec.timeRange})**: Subject: **${ec.subject}** | Faculty: **${ec.teacherName}** | Room: **${ec.room}** | Announcement Status: **${ec.isDone ? "\u2713 ANNOUNCEMENT DONE (Column O)" : "\u26A0\uFE0F ANNOUNCEMENT PENDING (Column O)"}**`
+    ).join("\n");
+  } else {
+    extraClassContext = `
+### \u{1F4CC} EXTRA CLASSES: No extra classes scheduled for this batch.`;
+  }
   const fallbackText = `### \u{1F4CB} Batch Details: **${batchCode}**
       
 *   **Active Center / Tab:** ${tabName || "General Center"}
@@ -1962,12 +2030,16 @@ Upcoming scheduled classes:
 
 ${scheduleContext}
 
+${auditContext}
+
+${extraClassContext}
+
 #### \u{1F50D} Academic Breakdown:
 - **Class / Level:** ${batchCode.includes("LJ") || batchCode.includes("LN") ? "Lakshya Series (Grade 12 / Board + Competitive Prep)" : batchCode.includes("AJ") || batchCode.includes("AN") ? "Arjuna Series (Grade 11 / Advanced Foundation)" : batchCode.includes("Y") ? "Yakeen Series (Dropper / Dedicated Repeater)" : "Specialized Program"}
 - **Shifts & Timings:** ${timeSlot === "Morning" ? "Morning Shift (MA/MP)" : timeSlot === "Afternoon" ? "Afternoon Shift (NA/NP)" : timeSlot === "Evening" ? "Evening Shift (EA/EP)" : timeSlot === "Weekend" ? "Weekend Batch (WA)" : "Standard Schedule"}
 
 #### \u{1F4C5} Timetable Summary:
-- Live classes, subjects, and teacher emails are extracted directly from Raw_DB above.`;
+- Live classes, subjects, extra lectures, and teacher emails are extracted directly from Raw_DB and Extra Class sheets above.`;
   const openRouterKey = (process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || "").trim();
   if (!openRouterKey) {
     return res.json({ explanation: fallbackText });
@@ -1989,6 +2061,10 @@ Context details provided:
 LIVE TIMETABLE DATA FROM 'Raw_DB' (Column AI = Subject, Column AK = Teacher Email):
 ${scheduleContext}
 
+${auditContext}
+
+${extraClassContext}
+
 Please provide a highly polished, professional, and actionable academic briefing in Markdown (STRICTLY IN ENGLISH ONLY):
 
 1. **\u{1F4C5} Today's Live Academic Schedule & Subject Flow**:
@@ -1996,9 +2072,12 @@ Please provide a highly polished, professional, and actionable academic briefing
    - If no lectures are scheduled today, highlight when the next class is and summarize the weekly schedule.
 2. **\u{1F4A1} Batch Academic Level & Phase**:
    - Identify grade/class (e.g., Arjuna = 11th, Lakshya = 12th, Yakeen = Droppers, Foundation = 9th/10th), target exam (JEE / NEET / Boards), and phase milestone.
-3. **\u{1F4CB} Batch Manager Action Checklist for Today**:
+3. **\u26A0\uFE0F Audit Issues & Extra Class Announcements Alert**:
+   - Explicitly highlight any audit issues or pendency recorded above (with subsheet, date, and error). If clean, state that no audit issues are pending.
+   - Mention any extra class scheduled and whether its announcement is DONE or PENDING.
+4. **\u{1F4CB} Batch Manager Action Checklist for Today**:
    - Provide 2-3 specific, tactical steps for ${bmEmail || "the BM"} for today's classes (e.g. verifying attendance, confirming room prep with faculty, ensuring DPP distribution).
-4. **\u{1F4AC} Student Daily Reminder Draft (WhatsApp format)**:
+5. **\u{1F4AC} Student Daily Reminder Draft (WhatsApp format)**:
    - Provide a concise, ready-to-copy WhatsApp message for students mentioning today's lecture times and subjects in clear English.
 
 Keep the output clean, encouraging, professional, strictly in English, and under 400 words.`;

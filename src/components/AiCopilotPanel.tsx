@@ -11,15 +11,22 @@ import {
   Calendar, 
   Clock, 
   Mail, 
+  Check,
+  CheckCircle2,
   CheckCheck, 
   Share2, 
   BookOpen, 
   AlertCircle,
+  AlertTriangle,
+  ShieldAlert,
   RotateCw,
   Search,
-  ChevronDown
+  ChevronDown,
+  Eye,
+  EyeOff,
+  MessageSquare
 } from 'lucide-react';
-import { Batch, BatchScheduleResponse, LectureSchedule } from '../types';
+import { Batch, BatchScheduleResponse, LectureSchedule, BatchAuditIssue, BatchExtraClassItem } from '../types';
 
 interface AiCopilotPanelProps {
   batch: Batch | null;
@@ -62,6 +69,8 @@ export default function AiCopilotPanel({
   const [copied, setCopied] = useState<boolean>(false);
   const [copiedSchedule, setCopiedSchedule] = useState<boolean>(false);
   const [copiedEmailId, setCopiedEmailId] = useState<string | null>(null);
+  const [expandedNoticeId, setExpandedNoticeId] = useState<string | null>(null);
+  const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
   const contentScrollRef = useRef<HTMLDivElement>(null);
   const aiSectionRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef<number>(0);
@@ -216,6 +225,8 @@ export default function AiCopilotPanel({
             bmEmail: activeBatch.bmEmail,
             todayLectures: fetchedSchedule?.todayLectures || [],
             allLectures: fetchedSchedule?.allLectures || [],
+            auditIssues: fetchedSchedule?.auditIssues || [],
+            extraClasses: fetchedSchedule?.extraClasses || [],
           }),
         });
         clearTimeout(timeoutId);
@@ -234,11 +245,25 @@ export default function AiCopilotPanel({
                 : `* **Today:** No classes scheduled.\n* **This Week:** ${fetchedSchedule.allLectures.length} class(es) scheduled on ${fetchedSchedule.daysAvailable?.join(', ') || 'other days'}.`)
             : `\n\n*(No live lecture rows found in timetable or extra class sheets for this batch.)*`;
 
+          let auditSummary = '';
+          if (fetchedSchedule?.auditIssues && fetchedSchedule.auditIssues.length > 0) {
+            auditSummary = `\n\n#### ⚠️ Audit Issues Recorded (${fetchedSchedule.auditIssues.length}):\n` +
+              fetchedSchedule.auditIssues.map(a => `* **${a.subsheet}** (${a.lecStartTime}): ${a.errors} [BM: ${a.finalBm}]`).join('\n');
+          } else {
+            auditSummary = `\n\n#### ✅ Audit Status:\n* No audit issues or pendency recorded.`;
+          }
+
+          let extraSummary = '';
+          if (fetchedSchedule?.extraClasses && fetchedSchedule.extraClasses.length > 0) {
+            extraSummary = `\n\n#### 📌 Extra Classes (${fetchedSchedule.extraClasses.length}):\n` +
+              fetchedSchedule.extraClasses.map(e => `* **${e.date}** (${e.timeRange}): ${e.subject} - Announcement: ${e.isDone ? 'DONE' : 'PENDING'}`).join('\n');
+          }
+
           setExplanation(`### 📋 Batch Details: **${activeBatch.displayName || activeBatch.fullName}**
 * **Center:** ${activeBatch.tabName || 'Pune Center'}
 * **Category:** ${activeBatch.category} | **Phase:** ${activeBatch.phase}
 * **Shift:** ${activeBatch.timeSlot || 'Standard'}
-* **Assigned BM:** ${activeBatch.bmEmail || 'None'}${scheduleSummary}`);
+* **Assigned BM:** ${activeBatch.bmEmail || 'None'}${scheduleSummary}${auditSummary}${extraSummary}`);
         }
       } finally {
         if (isMounted) setIsLoading(false);
@@ -408,6 +433,25 @@ export default function AiCopilotPanel({
     navigator.clipboard.writeText(email);
     setCopiedEmailId(id);
     setTimeout(() => setCopiedEmailId(null), 1800);
+  };
+
+  const handleCopyExtraAnnouncement = (item: BatchExtraClassItem) => {
+    let text = item.announcement;
+    if (!text) {
+      text = `Dear Vidyapeeth Students, ${item.teacherName || 'Faculty'} Sir/Ma'am will take Extra Class of ${item.subject || 'Special Lecture'} on (${item.date}) at (${item.timeRange}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
+    }
+    navigator.clipboard.writeText(text);
+    setCopiedNoticeId(item.id);
+    setTimeout(() => setCopiedNoticeId(null), 2000);
+  };
+
+  const handleShareExtraWhatsApp = (item: BatchExtraClassItem) => {
+    let text = item.announcement;
+    if (!text) {
+      text = `Dear Vidyapeeth Students, ${item.teacherName || 'Faculty'} Sir/Ma'am will take Extra Class of ${item.subject || 'Special Lecture'} on (${item.date}) at (${item.timeRange}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
+    }
+    const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+    window.open(waUrl, '_blank');
   };
 
   const quickQuestions = [
@@ -1174,15 +1218,278 @@ export default function AiCopilotPanel({
               <div className="h-px bg-slate-200 flex-1 group-hover:bg-slate-300 transition-colors" />
               <div className="flex items-center gap-1.5 px-3.5 py-1.5 bg-white border border-slate-200 group-hover:border-indigo-300 rounded-full shadow-2xs text-[9.5px] sm:text-[10px] font-black uppercase tracking-wider text-slate-600 group-hover:text-indigo-600 transition-all">
                 <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Scroll down for AI Academic Briefing & Chat</span>
+                <span>Scroll down for Audit, Extra Classes & AI Briefing</span>
                 <ChevronDown className="w-3.5 h-3.5 text-indigo-500 animate-bounce" />
               </div>
               <div className="h-px bg-slate-200 flex-1 group-hover:bg-slate-300 transition-colors" />
             </div>
 
-            {/* SECTION 2 & 3: GEMINI AI ACADEMIC DECODING, PROMPTS & CHAT */}
+            {/* SECTION 2 & 3: AUDIT ISSUES, EXTRA CLASSES & GEMINI AI COPILOT */}
             <div ref={aiSectionRef} className="space-y-4 pt-1">
-              {/* AI Academic Briefing Card */}
+              {/* 1. Audit Issues & Pendency Card */}
+              <div className="bg-white rounded-[2px] border border-[#E2E1DA] overflow-hidden shadow-xs">
+                <div className="bg-slate-50 border-b border-[#E2E1DA] px-3.5 py-2.5 flex items-center justify-between">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ShieldAlert className={`w-4 h-4 flex-shrink-0 ${
+                      scheduleData?.auditIssues && scheduleData.auditIssues.length > 0
+                        ? 'text-rose-600'
+                        : 'text-emerald-600'
+                    }`} />
+                    <span className="text-[11px] sm:text-xs font-black text-slate-900 uppercase tracking-wider truncate">
+                      Audit Sheet Status & Pendency
+                    </span>
+                  </div>
+                  {isScheduleLoading ? (
+                    <span className="flex items-center gap-1 text-[8.5px] font-bold text-slate-400 uppercase">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Checking...
+                    </span>
+                  ) : scheduleData?.auditIssues && scheduleData.auditIssues.length > 0 ? (
+                    <span className="px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase bg-rose-100 text-rose-800 border border-rose-200 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3 text-rose-600" />
+                      {scheduleData.auditIssues.length} Issue{scheduleData.auditIssues.length > 1 ? 's' : ''} Flagged
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                      Clean Record
+                    </span>
+                  )}
+                </div>
+
+                <div className="p-3 sm:p-3.5 space-y-2">
+                  {isScheduleLoading ? (
+                    <div className="py-4 text-center text-[10px] text-slate-400 font-bold uppercase tracking-wider flex items-center justify-center gap-1.5">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                      Scanning Pune Audit Sheet logs...
+                    </div>
+                  ) : scheduleData?.auditIssues && scheduleData.auditIssues.length > 0 ? (
+                    <div className="space-y-2">
+                      {scheduleData.auditIssues.map((issue, idx) => (
+                        <div 
+                          key={issue.id || idx}
+                          className="bg-rose-50/50 border border-rose-200/80 rounded-[2px] p-2.5 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap text-[9px]">
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-1.5 py-0.5 bg-rose-200 text-rose-900 font-black uppercase rounded-[1px] text-[8px]">
+                                {issue.subsheet || 'Audit Issue'}
+                              </span>
+                              {issue.branch && (
+                                <span className="text-slate-500 font-semibold">
+                                  {issue.branch}
+                                </span>
+                              )}
+                            </div>
+                            {issue.lecStartTime && (
+                              <div className="flex items-center gap-1 text-slate-600 font-medium">
+                                <Clock className="w-3 h-3 text-slate-400" />
+                                <span>{issue.lecStartTime}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-start gap-1.5 text-xs text-rose-950 font-medium">
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-600 flex-shrink-0 mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold text-rose-900 leading-snug">
+                                {issue.errors || 'Audit error flagged'}
+                              </p>
+                              {issue.subjectName && (
+                                <p className="text-[10px] text-slate-600 mt-0.5">
+                                  Subject: <span className="font-semibold text-slate-800">{issue.subjectName}</span>
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {issue.finalBm && (
+                            <div className="pt-1 border-t border-rose-200/50 flex items-center justify-between text-[8.5px] text-slate-500">
+                              <span>Assigned BM: <strong className="text-slate-700">{issue.finalBm}</strong></span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 p-2.5 bg-emerald-50/60 border border-emerald-200/80 rounded-[2px] text-emerald-900 text-xs">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="font-bold text-[11px] text-emerald-900">No Audit Issues Recorded</p>
+                        <p className="text-[9.5px] text-emerald-700">
+                          This batch has 0 audit issues or pendency recorded in the central Pune Audit Sheet.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 2. Extra Classes & Announcements Card */}
+              <div className="bg-white rounded-[2px] border border-[#E2E1DA] overflow-hidden shadow-xs">
+                <div className="bg-slate-50 border-b border-[#E2E1DA] px-3.5 py-2.5 flex items-center justify-between">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Sparkles className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                    <span className="text-[11px] sm:text-xs font-black text-slate-900 uppercase tracking-wider truncate">
+                      Extra Classes & Announcements
+                    </span>
+                  </div>
+                  {isScheduleLoading ? (
+                    <span className="flex items-center gap-1 text-[8.5px] font-bold text-slate-400 uppercase">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Checking...
+                    </span>
+                  ) : (
+                    <span className={`px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase ${
+                      scheduleData?.extraClasses && scheduleData.extraClasses.length > 0
+                        ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                        : 'bg-slate-100 text-slate-600 border border-slate-200'
+                    }`}>
+                      {scheduleData?.extraClasses?.length || 0} Extra Lecture{scheduleData?.extraClasses?.length !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                </div>
+
+                <div className="p-3 sm:p-3.5 space-y-2">
+                  {isScheduleLoading ? (
+                    <div className="py-4 text-center text-[10px] text-slate-400 font-bold uppercase tracking-wider flex items-center justify-center gap-1.5">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                      Checking extra class records...
+                    </div>
+                  ) : scheduleData?.extraClasses && scheduleData.extraClasses.length > 0 ? (
+                    <div className="space-y-2.5">
+                      {scheduleData.extraClasses.map((ec) => {
+                        const isExpanded = expandedNoticeId === ec.id;
+                        const isCopied = copiedNoticeId === ec.id;
+
+                        return (
+                          <div 
+                            key={ec.id}
+                            className={`border rounded-[2px] p-2.5 space-y-2 transition-all ${
+                              ec.isDone 
+                                ? 'bg-emerald-50/40 border-emerald-200' 
+                                : 'bg-amber-50/40 border-amber-200'
+                            }`}
+                          >
+                            {/* Top row: Date, Time & Announcement Badge */}
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5">
+                                <span className="px-1.5 py-0.5 bg-white text-slate-800 border border-slate-200 font-black uppercase rounded-[1px] text-[8.5px]">
+                                  {ec.date} ({ec.day})
+                                </span>
+                                <span className="px-1.5 py-0.5 bg-white text-indigo-700 border border-indigo-200 font-bold rounded-[1px] text-[8.5px] flex items-center gap-1">
+                                  <Clock className="w-2.5 h-2.5" />
+                                  {ec.timeRange}
+                                </span>
+                              </div>
+
+                              {/* Prominent Announcement Status Badge (Col O) */}
+                              {ec.isDone ? (
+                                <span className="px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  Announcement Done
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1 animate-pulse">
+                                  <AlertTriangle className="w-3 h-3 text-amber-600" />
+                                  Announcement Pending
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Lecture details */}
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <div className="min-w-0">
+                                <p className="font-bold text-slate-900 truncate">
+                                  {ec.subject}
+                                </p>
+                                <p className="text-[10px] text-slate-600">
+                                  Faculty: <strong className="text-slate-800">{ec.teacherName}</strong>
+                                  {ec.room ? ` • Room: ${ec.room}` : ''}
+                                </p>
+                              </div>
+
+                              <div className="flex items-center gap-1 flex-shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedNoticeId(isExpanded ? null : ec.id)}
+                                  className="px-2 py-1 bg-white hover:bg-slate-50 border border-slate-200 rounded-[2px] text-[8.5px] font-bold text-slate-700 flex items-center gap-1 cursor-pointer transition-all shadow-2xs"
+                                  title="Toggle WhatsApp Column K Announcement"
+                                >
+                                  {isExpanded ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                                  <span>{isExpanded ? 'Hide Notice' : 'Col K Notice'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyExtraAnnouncement(ec)}
+                                  className="p-1 bg-white hover:bg-slate-50 border border-slate-200 rounded-[2px] text-slate-600 hover:text-indigo-600 cursor-pointer transition-all shadow-2xs"
+                                  title="Copy Announcement Notice"
+                                >
+                                  {isCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleShareExtraWhatsApp(ec)}
+                                  className="p-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-[2px] cursor-pointer transition-all shadow-2xs"
+                                  title="Share to WhatsApp"
+                                >
+                                  <Share2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Expandable Column K Notice Box */}
+                            {isExpanded && (
+                              <div className="pt-2 border-t border-slate-200/80 space-y-1.5">
+                                <div className="flex items-center justify-between text-[8px] font-black uppercase tracking-wider text-slate-500">
+                                  <span className="flex items-center gap-1 text-indigo-700">
+                                    <MessageSquare className="w-3 h-3" />
+                                    Extra Class Announcement Message (Column K)
+                                  </span>
+                                  {isCopied && <span className="text-emerald-600 font-bold">✓ Copied!</span>}
+                                </div>
+                                <div className="p-2 bg-white rounded border border-slate-200 text-[10.5px] text-slate-700 font-sans whitespace-pre-wrap leading-relaxed select-text">
+                                  {ec.announcement || `Dear Vidyapeeth Students, ${ec.teacherName} Sir/Ma'am will take Extra Class of ${ec.subject} on (${ec.date}) at (${ec.timeRange}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`}
+                                </div>
+                                <div className="flex items-center justify-end gap-1.5 pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyExtraAnnouncement(ec)}
+                                    className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 rounded-[2px] text-[9px] font-bold flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    <span>{isCopied ? 'Copied' : 'Copy Message'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleShareExtraWhatsApp(ec)}
+                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-[2px] text-[9px] font-bold flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <Share2 className="w-3 h-3" />
+                                    <span>WhatsApp Share</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 p-2.5 bg-slate-50 border border-slate-200/80 rounded-[2px] text-slate-600 text-xs">
+                      <BookOpen className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="font-bold text-[11px] text-slate-800">No Extra Classes Scheduled</p>
+                        <p className="text-[9.5px] text-slate-500">
+                          There are no extra lectures recorded for this batch in the Extra Class tracker.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 3. AI Academic Briefing Card */}
               <div className="bg-white p-4 rounded-[2px] border border-[#E2E1DA] relative group shadow-xs">
                 <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#E2E1DA]">
                   <div className="flex items-center gap-1.5">
