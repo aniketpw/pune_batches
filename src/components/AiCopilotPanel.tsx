@@ -577,6 +577,11 @@ export default function AiCopilotPanel({
                 {lec.day}
               </span>
             )}
+            {lec.lectureDate && (
+              <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-[2px] text-[8.5px] font-bold">
+                {lec.lectureDate}
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5 flex-shrink-0">

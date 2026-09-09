@@ -489,14 +489,33 @@ app.use((req, _res, next) => {
     const seen = new Set<string>();
     const unique: any[] = [];
 
+    const normalizeTimeKey = (timeStr: string) => {
+      if (!timeStr) return "";
+      // Standardize single digit hours: '8:00' -> '08:00'
+      const standardized = timeStr.replace(/\b(\d):/g, "0$1:");
+      return standardized.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+    };
+
+    const normalizeSubjectKey = (sub: string) => {
+      const clean = (sub || "").trim().toUpperCase();
+      if (clean.includes("PHY")) return "PHY";
+      if (clean.includes("CHEM")) return "CHEM";
+      if (clean.includes("MATH")) return "MATH";
+      if (clean.includes("BOT")) return "BOT";
+      if (clean.includes("ZOO")) return "ZOO";
+      if (clean.includes("BIO")) return "BIO";
+      return clean.replace(/[^A-Z0-9]/gi, "");
+    };
+
     for (const lec of lectures) {
       const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
-      const cleanTime = (lec.timeRange || `${lec.startTime}-${lec.endTime}`)
-        .replace(/[^A-Z0-9]/gi, "")
-        .toUpperCase();
-      const cleanSubject = (lec.subject || "").trim().toUpperCase();
-      const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
-      const key = `${cleanDay}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
+      const cleanDate = (lec.lectureDate || "").trim().toUpperCase().replace(/[^A-Z0-9]/gi, "");
+      const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
+      const cleanSubject = normalizeSubjectKey(lec.subject);
+      const cleanFaculty = (lec.facultyCode || lec.teacherName || "").trim().toUpperCase().replace(/[^A-Z0-9]/gi, "");
+      
+      // Primary key checks day, date (if present), time, and subject
+      const key = `${cleanDay}_${cleanDate}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
 
       if (!seen.has(key)) {
         seen.add(key);
@@ -1422,7 +1441,7 @@ app.use((req, _res, next) => {
       try {
         const extraPayload = await fetchAllExtraClassLectures(sheets, forceRefresh);
         const matchingExtra = (extraPayload.classes || []).filter((ec: any) =>
-          isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
+          isBatchMatch(ec.batchCode, ec.facultyCode, batchCode) && (!ec.isPast || ec.isToday)
         );
 
         if (matchingExtra.length > 0) {

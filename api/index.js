@@ -373,12 +373,28 @@ function parseRawDbRows(rows) {
 function deduplicateLectures(lectures) {
   const seen = /* @__PURE__ */ new Set();
   const unique = [];
+  const normalizeTimeKey = (timeStr) => {
+    if (!timeStr) return "";
+    const standardized = timeStr.replace(/\b(\d):/g, "0$1:");
+    return standardized.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  };
+  const normalizeSubjectKey = (sub) => {
+    const clean = (sub || "").trim().toUpperCase();
+    if (clean.includes("PHY")) return "PHY";
+    if (clean.includes("CHEM")) return "CHEM";
+    if (clean.includes("MATH")) return "MATH";
+    if (clean.includes("BOT")) return "BOT";
+    if (clean.includes("ZOO")) return "ZOO";
+    if (clean.includes("BIO")) return "BIO";
+    return clean.replace(/[^A-Z0-9]/gi, "");
+  };
   for (const lec of lectures) {
     const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
-    const cleanTime = (lec.timeRange || `${lec.startTime}-${lec.endTime}`).replace(/[^A-Z0-9]/gi, "").toUpperCase();
-    const cleanSubject = (lec.subject || "").trim().toUpperCase();
-    const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
-    const key = `${cleanDay}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
+    const cleanDate = (lec.lectureDate || "").trim().toUpperCase().replace(/[^A-Z0-9]/gi, "");
+    const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
+    const cleanSubject = normalizeSubjectKey(lec.subject);
+    const cleanFaculty = (lec.facultyCode || lec.teacherName || "").trim().toUpperCase().replace(/[^A-Z0-9]/gi, "");
+    const key = `${cleanDay}_${cleanDate}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
     if (!seen.has(key)) {
       seen.add(key);
       unique.push(lec);
@@ -1141,7 +1157,7 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
     try {
       const extraPayload = await fetchAllExtraClassLectures(sheets, forceRefresh);
       const matchingExtra = (extraPayload.classes || []).filter(
-        (ec) => isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
+        (ec) => isBatchMatch(ec.batchCode, ec.facultyCode, batchCode) && (!ec.isPast || ec.isToday)
       );
       if (matchingExtra.length > 0) {
         const { now } = getIstDateInfo();
