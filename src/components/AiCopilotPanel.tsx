@@ -15,7 +15,8 @@ import {
   BookOpen, 
   AlertCircle,
   RotateCw,
-  Search
+  Search,
+  ChevronDown
 } from 'lucide-react';
 import { Batch, BatchScheduleResponse, LectureSchedule } from '../types';
 
@@ -622,25 +623,80 @@ export default function AiCopilotPanel({
     });
   };
 
+  // Swipe to close handlers for mobile bottom sheet
+  const [swipeDownOffset, setSwipeDownOffset] = useState<number>(0);
+  const touchStartYRef = useRef<number>(0);
+  const isDraggingSheet = useRef<boolean>(false);
+
+  const handleSheetTouchStart = (e: React.TouchEvent) => {
+    touchStartYRef.current = e.touches[0].clientY;
+    isDraggingSheet.current = true;
+  };
+
+  const handleSheetTouchMove = (e: React.TouchEvent) => {
+    if (!isDraggingSheet.current) return;
+    const currentY = e.touches[0].clientY;
+    const deltaY = currentY - touchStartYRef.current;
+    if (deltaY > 0) {
+      setSwipeDownOffset(deltaY);
+    } else {
+      setSwipeDownOffset(0);
+    }
+  };
+
+  const handleSheetTouchEnd = () => {
+    if (!isDraggingSheet.current) return;
+    isDraggingSheet.current = false;
+    if (swipeDownOffset > 70) {
+      onClose();
+    }
+    setSwipeDownOffset(0);
+  };
+
   const parseInlineBold = (text: string) => {
     const parts = text.split(/\*\*([^*]+)\*\*/g);
     return parts.map((part, i) => (i % 2 === 1 ? <strong key={i} className="font-bold text-slate-800">{part}</strong> : part));
   };
 
   return (
-    <div className="bg-white rounded-t-xl sm:rounded-[2px] border border-[#E2E1DA] flex flex-col h-full w-full lg:w-[420px] xl:w-[460px] flex-shrink-0 overflow-hidden shadow-2xl lg:shadow-sm overscroll-contain" id="ai-copilot-panel">
-      {/* Mobile drag indicator */}
-      <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto my-1.5 lg:hidden flex-shrink-0 touch-none select-none" />
+    <div 
+      className="bg-white rounded-t-2xl sm:rounded-[2px] border border-[#E2E1DA] flex flex-col h-full w-full lg:w-[420px] xl:w-[460px] flex-shrink-0 overflow-hidden shadow-2xl lg:shadow-sm overscroll-contain will-change-transform" 
+      id="ai-copilot-panel"
+      style={{
+        transform: swipeDownOffset > 0 ? `translateY(${swipeDownOffset}px)` : undefined,
+        transition: swipeDownOffset === 0 ? 'transform 0.22s cubic-bezier(0.16, 1, 0.3, 1)' : 'none'
+      }}
+    >
+      {/* Mobile drag handle with interactive swipe-down-to-close */}
+      <div 
+        className="w-full pt-2.5 pb-2 flex flex-col items-center justify-center cursor-grab active:cursor-grabbing touch-none select-none lg:hidden bg-slate-900 border-b border-slate-800 active:bg-slate-800 transition-colors"
+        onTouchStart={handleSheetTouchStart}
+        onTouchMove={handleSheetTouchMove}
+        onTouchEnd={handleSheetTouchEnd}
+        onClick={onClose}
+        title="Swipe down or tap to close"
+      >
+        <div className="w-12 h-1.5 bg-slate-500 rounded-full transition-colors" />
+        <div className="flex items-center gap-1 text-[9px] text-slate-400 font-bold uppercase tracking-wider mt-1">
+          <ChevronDown className="w-3 h-3 text-slate-400 animate-pulse" />
+          <span>Swipe down to close</span>
+        </div>
+      </div>
 
       {/* Header */}
-      <div className="bg-slate-900 text-white px-3.5 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between flex-shrink-0 touch-none select-none">
+      <div 
+        className="bg-slate-900 text-white px-3.5 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between flex-shrink-0 touch-none select-none cursor-grab active:cursor-grabbing"
+        onTouchStart={handleSheetTouchStart}
+        onTouchMove={handleSheetTouchMove}
+        onTouchEnd={handleSheetTouchEnd}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <div className="p-1 bg-indigo-600 rounded-[2px] text-white flex-shrink-0">
             <Sparkles className="w-3.5 h-3.5" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-[10px] font-black tracking-wider uppercase text-white truncate">AI Decode & Schedule</h3>
+              <h3 className="text-xs font-black tracking-wider uppercase text-white truncate">AI Decode & Schedule</h3>
               <span className="px-1.5 py-0.5 bg-emerald-950 text-emerald-300 border border-emerald-700 text-[8px] font-black uppercase rounded-[1px] flex-shrink-0">
                 Raw_DB Live
               </span>

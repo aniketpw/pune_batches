@@ -95,75 +95,75 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
 
   return (
     <div 
-      className="bg-white rounded-[2px] border border-[#E2E1DA] hover:border-slate-900/40 p-3.5 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 sm:gap-4 transition-all relative group"
+      className="bg-white rounded-[2px] border border-[#E2E1DA] hover:border-slate-900/40 p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 sm:gap-4 transition-all relative group shadow-2xs"
       id={`batch-${batch.rowIndex}`}
     >
       {/* Left Details */}
-      <div className="space-y-2 sm:space-y-3 flex-1 min-w-0">
-        <div className="flex items-center gap-2.5">
-          <h4 className="text-sm sm:text-base font-bold text-slate-800 tracking-tight truncate font-sans">
+      <div className="space-y-2.5 sm:space-y-3 flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2.5">
+          <h4 className="text-base sm:text-lg font-black text-slate-900 tracking-tight truncate font-sans">
             {formattedTitle}
           </h4>
-          <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
             <button
               type="button"
               onClick={handleCopyCode}
-              className="p-1 text-slate-400 hover:text-slate-950 hover:bg-[#FAF9F5] rounded-[2px] transition-all cursor-pointer flex items-center justify-center"
+              className="p-1.5 text-slate-400 hover:text-slate-950 hover:bg-[#FAF9F5] rounded-[2px] transition-all cursor-pointer flex items-center justify-center border border-transparent hover:border-slate-200"
               title="Copy batch code"
             >
               {copied ? (
-                <span className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider px-1">Copied!</span>
+                <span className="text-[10px] text-emerald-600 font-black uppercase tracking-wider px-1">Copied!</span>
               ) : (
-                <Copy className="w-3.5 h-3.5" />
+                <Copy className="w-4 h-4" />
               )}
             </button>
             <button
               type="button"
               onClick={handleShareWhatsApp}
-              className="p-1 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-[2px] transition-all cursor-pointer flex items-center justify-center"
+              className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-[2px] transition-all cursor-pointer flex items-center justify-center border border-transparent hover:border-emerald-200"
               title="Share batch details on WhatsApp"
             >
-              <Share2 className="w-3.5 h-3.5" />
+              <Share2 className="w-4 h-4" />
             </button>
             <button
               type="button"
               onClick={() => onEdit(batch)}
-              className="p-1 text-slate-400 hover:text-slate-950 hover:bg-[#FAF9F5] rounded-[2px] transition-all cursor-pointer flex items-center justify-center"
+              className="p-1.5 text-slate-400 hover:text-slate-950 hover:bg-[#FAF9F5] rounded-[2px] transition-all cursor-pointer flex items-center justify-center border border-transparent hover:border-slate-200"
               title="Edit details"
               id={`edit-btn-${batch.rowIndex}`}
             >
-              <Edit2 className="w-3.5 h-3.5" />
+              <Edit2 className="w-4 h-4" />
             </button>
           </div>
         </div>
 
         {/* Badges row */}
-        <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          <span className={`px-2 py-0.5 rounded-[2px] font-bold tracking-wide uppercase text-[9px] ${getCategoryStyles(batch.category)}`}>
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs">
+          <span className={`px-2.5 py-1 rounded-[2px] font-black tracking-wide uppercase text-[10px] sm:text-[11px] shadow-2xs ${getCategoryStyles(batch.category)}`}>
             {batch.category}
           </span>
           {batch.phase && batch.phase !== 'Unknown' && (
-            <span className={`px-2 py-0.5 rounded-[2px] font-bold uppercase text-[9px] ${getPhaseStyles(batch.phase)}`}>
+            <span className={`px-2.5 py-1 rounded-[2px] font-black uppercase text-[10px] sm:text-[11px] shadow-2xs ${getPhaseStyles(batch.phase)}`}>
               {batch.phase}
             </span>
           )}
           {batch.timeSlot && (
-            <span className={`px-2 py-0.5 rounded-[2px] font-bold uppercase text-[9px] ${getTimeSlotStyles(batch.timeSlot)}`}>
+            <span className={`px-2.5 py-1 rounded-[2px] font-black uppercase text-[10px] sm:text-[11px] shadow-2xs ${getTimeSlotStyles(batch.timeSlot)}`}>
               {batch.timeSlot}
             </span>
           )}
           {batch.bmEmail ? (
-            <span className="px-2 py-0.5 rounded-[2px] bg-slate-50 text-slate-600 border border-slate-200 text-[9px] font-bold uppercase tracking-wider truncate max-w-[160px] sm:max-w-[180px]" title={`Manager: ${batch.bmEmail}`}>
+            <span className="px-2.5 py-1 rounded-[2px] bg-slate-50 text-slate-700 border border-slate-200 text-[10px] sm:text-[11px] font-black uppercase tracking-wider truncate max-w-[200px] sm:max-w-none shadow-2xs" title={`Manager: ${batch.bmEmail}`}>
               BM: {batch.bmEmail.split('@')[0]}
             </span>
           ) : (
-            <span className="px-2 py-0.5 rounded-[2px] bg-red-50 text-red-600 border border-red-200 text-[9px] font-bold uppercase tracking-wider">
+            <span className="px-2.5 py-1 rounded-[2px] bg-red-50 text-red-600 border border-red-200 text-[10px] sm:text-[11px] font-black uppercase tracking-wider shadow-2xs">
               No Manager Assigned
             </span>
           )}
           {batch.previousNames && batch.previousNames.length > 0 && (
             <span 
-              className="px-2 py-0.5 rounded-[2px] bg-slate-100 text-slate-600 border border-slate-300 text-[9px] font-bold uppercase tracking-wider"
+              className="px-2.5 py-1 rounded-[2px] bg-slate-100 text-slate-600 border border-slate-300 text-[10px] sm:text-[11px] font-black uppercase tracking-wider shadow-2xs"
               title={`Combined with earlier row: ${batch.previousNames.join(', ')}`}
             >
               Prev: {batch.previousNames[batch.previousNames.length - 1]}
@@ -186,8 +186,8 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
         )}
       </div>
 
-      {/* Right Actions */}
-      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 flex-shrink-0 pt-2 lg:pt-0 border-t border-slate-100 lg:border-none">
+      {/* Right Actions - Full Width 4-Col Grid on Mobile, Flex on Desktop */}
+      <div className="grid grid-cols-4 gap-1.5 sm:gap-2 w-full lg:w-auto lg:flex lg:items-center flex-shrink-0 pt-3 lg:pt-0 border-t border-slate-100 lg:border-none">
         {/* AI Explainer Action */}
         {onExplain && (
           <button
@@ -196,12 +196,12 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
               e.preventDefault();
               onExplain(batch);
             }}
-            className="px-2.5 py-1.5 text-[10px] font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-[2px] border border-indigo-200 flex items-center gap-1.5 transition-all cursor-pointer uppercase tracking-wider group/aidecode shadow-2xs active:scale-95"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 text-indigo-700 rounded-[2px] border border-indigo-200 flex items-center justify-center gap-1.5 transition-all cursor-pointer uppercase tracking-wider group/aidecode shadow-xs active:scale-95"
             title="View Today's Schedule & AI Decode (Raw_DB)"
             id={`ai-decode-btn-${batch.rowIndex}`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-indigo-600 fill-indigo-200 group-hover/aidecode:scale-110 transition-transform" />
-            <span>AI Decode</span>
+            <Sparkles className="w-3.5 h-3.5 text-indigo-600 fill-indigo-200 group-hover/aidecode:scale-110 transition-transform flex-shrink-0" />
+            <span className="truncate">AI Decode</span>
           </button>
         )}
 
@@ -212,25 +212,25 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
             target="_blank"
             rel="noopener noreferrer"
             referrerPolicy="no-referrer"
-            className="px-2.5 py-1.5 text-[10px] font-bold border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100/60 rounded-[2px] flex items-center gap-1 transition-all uppercase tracking-wider"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100/70 rounded-[2px] flex items-center justify-center gap-1.5 transition-all uppercase tracking-wider shadow-xs active:scale-95"
             id={`drive-link-${batch.rowIndex}`}
           >
-            <HardDrive className="w-3 h-3" />
-            <span>Drive</span>
+            <HardDrive className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="truncate">Drive</span>
           </a>
         ) : (
           <button
             onClick={handleScanClick}
             disabled={isScanning}
-            className="px-2.5 py-1.5 text-[10px] font-bold border border-dashed border-amber-300 bg-amber-50/30 text-amber-700 hover:bg-amber-50 rounded-[2px] flex items-center gap-1 transition-all disabled:opacity-65 uppercase tracking-wider"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black border border-dashed border-amber-300 bg-amber-50/50 text-amber-700 hover:bg-amber-100 rounded-[2px] flex items-center justify-center gap-1.5 transition-all disabled:opacity-65 uppercase tracking-wider shadow-xs active:scale-95 cursor-pointer"
             id={`scan-btn-${batch.rowIndex}`}
           >
             {isScanning ? (
-              <Loader2 className="w-3 h-3 animate-spin text-amber-500" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500 flex-shrink-0" />
             ) : (
-              <RefreshCw className="w-3 h-3 text-amber-400 group-hover:rotate-45 transition-transform" />
+              <RefreshCw className="w-3.5 h-3.5 text-amber-500 group-hover:rotate-45 transition-transform flex-shrink-0" />
             )}
-            <span>Scan Drive</span>
+            <span className="truncate">Scan Drive</span>
           </button>
         )}
 
@@ -241,20 +241,20 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
             target="_blank"
             rel="noopener noreferrer"
             referrerPolicy="no-referrer"
-            className="px-2.5 py-1.5 text-[10px] font-bold border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 rounded-[2px] flex items-center gap-1 transition-all uppercase tracking-wider"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 rounded-[2px] flex items-center justify-center gap-1.5 transition-all uppercase tracking-wider shadow-xs active:scale-95"
             id={`app-link-${batch.rowIndex}`}
           >
-            <Chrome className="w-3 h-3 text-slate-400" />
-            <span>App</span>
+            <Chrome className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+            <span className="truncate">App</span>
           </a>
         ) : (
           <button
             disabled
-            className="px-2.5 py-1.5 text-[10px] font-bold border border-slate-100 bg-slate-50 text-slate-300 rounded-[2px] flex items-center gap-1 cursor-not-allowed uppercase tracking-wider"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black border border-slate-100 bg-slate-50 text-slate-300 rounded-[2px] flex items-center justify-center gap-1.5 cursor-not-allowed uppercase tracking-wider"
             id={`app-link-disabled-${batch.rowIndex}`}
           >
-            <Chrome className="w-3 h-3" />
-            <span>App</span>
+            <Chrome className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="truncate">App</span>
           </button>
         )}
 
@@ -265,20 +265,20 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
             target="_blank"
             rel="noopener noreferrer"
             referrerPolicy="no-referrer"
-            className="px-2.5 py-1.5 text-[10px] font-bold bg-slate-900 hover:bg-slate-800 text-white border border-slate-900 rounded-[2px] flex items-center gap-1 transition-all duration-200 uppercase tracking-wider"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black bg-slate-900 hover:bg-black text-white border border-slate-900 rounded-[2px] flex items-center justify-center gap-1.5 transition-all duration-200 uppercase tracking-wider shadow-xs active:scale-95"
             id={`admin-link-${batch.rowIndex}`}
           >
-            <span>Admin</span>
-            <ExternalLink className="w-3 h-3 opacity-80" />
+            <span className="truncate">Admin</span>
+            <ExternalLink className="w-3.5 h-3.5 opacity-80 flex-shrink-0" />
           </a>
         ) : (
           <button
             disabled
-            className="px-2.5 py-1.5 text-[10px] font-bold bg-slate-50 border border-slate-100 text-slate-300 rounded-[2px] flex items-center gap-1 cursor-not-allowed uppercase tracking-wider"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black bg-slate-50 border border-slate-100 text-slate-300 rounded-[2px] flex items-center justify-center gap-1.5 cursor-not-allowed uppercase tracking-wider"
             id={`admin-link-disabled-${batch.rowIndex}`}
           >
-            <span>Admin</span>
-            <ExternalLink className="w-3 h-3" />
+            <span className="truncate">Admin</span>
+            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
           </button>
         )}
       </div>
