@@ -514,8 +514,21 @@ app.use((req, _res, next) => {
       const endTime = (row[endIdx] || "").toString().trim();
       const timeRange = (row[timeIdx] || (startTime && endTime ? `${startTime} - ${endTime}` : "")).toString().trim();
       const facultyCode = (row[facultyCodeIdx] || "").toString().trim();
-      const subject = (row[subjectIdx] || "").toString().trim();
-      const teacherEmail = (row[teacherEmailIdx] || "").toString().trim();
+      let subject = (row[subjectIdx] || "").toString().trim();
+      if (!subject || subject.toLowerCase() === "general" || subject.toLowerCase() === "lecture") {
+        const derived = getSubjectFromFacultyCode(facultyCode);
+        if (derived) subject = derived;
+      }
+      let teacherEmail = (row[teacherEmailIdx] || "").toString().trim();
+      if (!teacherEmail || !teacherEmail.includes("@")) {
+        for (let c = 10; c < Math.min(row.length, 45); c++) {
+          const val = (row[c] || "").toString().trim();
+          if (val.includes("@") && val.includes(".")) {
+            teacherEmail = val;
+            break;
+          }
+        }
+      }
 
       const isToday = isDateOrDayMatchingToday(lectureDate, day, todayDate, todayDay, now);
       const status = computeLectureStatus(startTime, endTime, isToday, now);
@@ -540,6 +553,18 @@ app.use((req, _res, next) => {
     return deduplicateLectures(result);
   }
 
+  function getSubjectFromFacultyCode(fCode: string): string {
+    if (!fCode) return "";
+    const first = fCode.trim().toUpperCase()[0];
+    if (first === "P") return "Physics";
+    if (first === "C") return "Chemistry";
+    if (first === "M") return "Maths";
+    if (first === "B") return "Botany";
+    if (first === "Z") return "Zoology";
+    if (first === "E") return "English";
+    return "";
+  }
+
   function deduplicateLectures(lectures: any[]): any[] {
     const seen = new Map<string, any>();
 
@@ -551,11 +576,13 @@ app.use((req, _res, next) => {
     };
 
     for (const lec of lectures) {
+      const cleanBatch = cleanBatchKey(lec.batchCode || lec.batchFaculty || "");
       const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
       const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
+      const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
       
-      // Slot key checks Day and Time Slot (e.g. WED_0845AM1015AM) to avoid overlapping duplicate lectures
-      const slotKey = `${cleanDay}_${cleanTime}`;
+      // CRITICAL: Slot key MUST include cleanBatch so different batches are never collapsed together!
+      const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}_${cleanFaculty}`;
 
       if (!seen.has(slotKey)) {
         seen.set(slotKey, lec);
