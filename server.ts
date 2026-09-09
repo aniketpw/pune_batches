@@ -385,50 +385,45 @@ app.use((req, _res, next) => {
     return clean;
   }
 
+  function extractCoreBatchCode(str: string): string {
+    if (!str) return "";
+    const clean = (str || "").toUpperCase();
+    const m = clean.match(/\b(?:27-|S98-)?([A-Z]{2,4}\d{2,3}[A-Z0-9]{2,4})\b/);
+    if (m) return m[1];
+    const m2 = clean.match(/([A-Z]{2}\d{3}[A-Z]{2})/);
+    if (m2) return m2[1];
+    return clean.replace(/[^A-Z0-9]/g, "");
+  }
+
   function isBatchMatch(rowBatch: string, rowBatchFaculty: string, targetBatch: string): boolean {
     if (!targetBatch) return false;
 
+    const targetCore = extractCoreBatchCode(targetBatch);
+    const rowBatchCore = extractCoreBatchCode(rowBatch);
+    const rowFacultyCore = extractCoreBatchCode(rowBatchFaculty);
+
+    // Exact core match (e.g. AJ253MA === AJ253MA)
+    if (targetCore && rowBatchCore && targetCore === rowBatchCore) return true;
+    if (targetCore && rowFacultyCore && targetCore === rowFacultyCore) return true;
+
+    // Cleaned string match
     const targetClean = cleanBatchKey(targetBatch);
     const rowBatchClean = cleanBatchKey(rowBatch);
-    const rowFacultyClean = cleanBatchKey(rowBatchFaculty);
-
-    if (targetClean && rowBatchClean && targetClean === rowBatchClean) return true;
-
-    if (targetClean.length >= 4 && rowBatchClean && (rowBatchClean.includes(targetClean) || targetClean.includes(rowBatchClean))) {
+    if (targetClean && rowBatchClean && (targetClean === rowBatchClean || rowBatchClean.endsWith(targetClean) || targetClean.endsWith(rowBatchClean))) {
       return true;
-    }
-    if (targetClean.length >= 4 && rowFacultyClean && rowFacultyClean.includes(targetClean)) {
-      return true;
-    }
-
-    const targetCore = extractCoreAlphanumeric(targetBatch);
-    if (targetCore && targetCore.length >= 4) {
-      if (rowBatchClean.includes(targetCore) || rowFacultyClean.includes(targetCore)) {
-        return true;
-      }
-    }
-
-    const rowCore = extractCoreAlphanumeric(rowBatch);
-    if (rowCore && rowCore.length >= 4 && targetClean.includes(rowCore)) {
-      return true;
-    }
-
-    // Also strip center prefix (e.g. 27-, S98-, or any 2-digit prefix) from both sides
-    const stripCenter = (s: string) => s.replace(/^(27|S98|\d{2})/, "");
-    const targetNoCenter = stripCenter(targetClean);
-    const rowNoCenter = stripCenter(rowBatchClean);
-    const facultyNoCenter = stripCenter(rowFacultyClean);
-
-    if (targetNoCenter.length >= 4) {
-      if (rowNoCenter.length >= 4 && (targetNoCenter === rowNoCenter || rowNoCenter.includes(targetNoCenter) || targetNoCenter.includes(rowNoCenter))) {
-        return true;
-      }
-      if (facultyNoCenter.length >= 4 && (facultyNoCenter.includes(targetNoCenter) || targetNoCenter.includes(facultyNoCenter))) {
-        return true;
-      }
     }
 
     return false;
+  }
+
+  function getTeacherNameFromEmail(email: string): string {
+    if (!email || !email.includes("@")) return "";
+    const prefix = email.split("@")[0].replace(/\d+$/, "");
+    const parts = prefix.split(/[._-]/).filter(Boolean);
+    if (parts.length === 0) return "";
+    return parts
+      .map((p) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+      .join(" ");
   }
 
   function parseRawDbRows(rows: any[][]): any[] {
@@ -532,6 +527,7 @@ app.use((req, _res, next) => {
 
       const isToday = isDateOrDayMatchingToday(lectureDate, day, todayDate, todayDay, now);
       const status = computeLectureStatus(startTime, endTime, isToday, now);
+      const teacherName = getTeacherNameFromEmail(teacherEmail);
 
       result.push({
         day,
@@ -544,6 +540,7 @@ app.use((req, _res, next) => {
         facultyCode,
         subject,
         teacherEmail,
+        teacherName,
         isToday,
         status,
         rowIndex: i + 1,

@@ -268,7 +268,7 @@ export default function AiCopilotPanel({
           const scheduleSummary = fetchedSchedule && fetchedSchedule.allLectures.length > 0
             ? `\n\n#### 📅 Timetable Overview:\n` +
               (fetchedSchedule.todayLectures.length > 0
-                ? `* **Today's Classes:** ${fetchedSchedule.todayLectures.map(l => `${l.timeRange || l.startTime}: ${l.subject || 'Lecture'} (${l.facultyCode || 'Faculty'}${l.room ? ` - ${l.room}` : ''})`).join(', ')}`
+                ? `* **Today's Classes:** ${fetchedSchedule.todayLectures.map(l => `${l.timeRange || l.startTime}: ${l.subject || 'Lecture'} (${l.teacherName || l.teacherEmail?.split('@')[0] || 'Teacher'}${l.room ? ` - ${l.room}` : ''})`).join(', ')}`
                 : `* **Today:** No classes scheduled.\n* **This Week:** ${fetchedSchedule.allLectures.length} class(es) scheduled on ${fetchedSchedule.daysAvailable?.join(', ') || 'other days'}.`)
             : `\n\n*(No live lecture rows found in timetable or extra class sheets for this batch.)*`;
 
@@ -372,9 +372,10 @@ export default function AiCopilotPanel({
         text += `No lectures scheduled for today.\n`;
       } else {
         currentTodayLectures.forEach((lec, i) => {
+          const teacherDisplay = lec.teacherName || (lec.teacherEmail ? lec.teacherEmail.split('@')[0] : 'Assigned');
           text += `*Lecture ${i + 1}:* ${lec.timeRange || `${lec.startTime} - ${lec.endTime}`}\n`;
           text += `🔹 *Subject:* ${lec.subject || 'General'}\n`;
-          text += `👨‍🏫 *Faculty:* ${lec.facultyCode || 'TBD'}\n`;
+          text += `👨‍🏫 *Teacher:* ${teacherDisplay}\n`;
           if (lec.teacherEmail) text += `✉️ *Email:* ${lec.teacherEmail}\n`;
           text += `\n`;
         });
@@ -395,7 +396,8 @@ export default function AiCopilotPanel({
           text += `━━━━━━━━━━━━━━━━━━━━━\n`;
           text += `🗓️ *${group.dayLabel.toUpperCase()}${group.date ? ` (${group.date})` : ''}*:\n`;
           group.lectures.forEach((lec, i) => {
-            text += `  ${i + 1}. ${lec.timeRange || `${lec.startTime} - ${lec.endTime}`} | *${lec.subject || 'General'}* | Fac: ${lec.facultyCode || 'TBD'}`;
+            const teacherDisplay = lec.teacherName || (lec.teacherEmail ? lec.teacherEmail.split('@')[0] : 'Assigned');
+            text += `  ${i + 1}. ${lec.timeRange || `${lec.startTime} - ${lec.endTime}`} | *${lec.subject || 'General'}* | Teacher: ${teacherDisplay}`;
             if (lec.teacherEmail) text += ` (${lec.teacherEmail})`;
             text += `\n`;
           });
@@ -421,9 +423,10 @@ export default function AiCopilotPanel({
       text += `No lectures scheduled for ${selectedDayFilter}.\n`;
     } else {
       targetLectures.forEach((lec, i) => {
+        const teacherDisplay = lec.teacherName || (lec.teacherEmail ? lec.teacherEmail.split('@')[0] : 'Assigned');
         text += `*Lecture ${i + 1}:* ${lec.timeRange || `${lec.startTime} - ${lec.endTime}`}\n`;
         text += `🔹 *Subject:* ${lec.subject || 'General'}\n`;
-        text += `👨‍🏫 *Faculty:* ${lec.facultyCode || 'TBD'}\n`;
+        text += `👨‍🏫 *Teacher:* ${teacherDisplay}\n`;
         if (lec.teacherEmail) text += `✉️ *Email:* ${lec.teacherEmail}\n`;
         text += `\n`;
       });
@@ -704,12 +707,12 @@ export default function AiCopilotPanel({
           </div>
         </div>
 
-        {/* Bottom Row: Faculty, Room & Teacher Email */}
+        {/* Bottom Row: Teacher, Room & Teacher Email */}
         <div className="flex items-center justify-between text-xs pt-1.5 border-t border-slate-100 text-slate-600 gap-2 flex-wrap">
           <div className="flex items-center gap-1.5 font-bold min-w-0">
-            <span className="text-slate-400 uppercase text-[9px] flex-shrink-0">Faculty:</span>
-            <span className="text-slate-900 font-black text-xs sm:text-[13px] truncate max-w-[150px]">
-              {lec.teacherName ? `${lec.teacherName} (${lec.facultyCode || 'TBD'})` : (lec.facultyCode || 'TBD')}
+            <span className="text-slate-400 uppercase text-[9px] flex-shrink-0">Teacher:</span>
+            <span className="text-slate-900 font-black text-xs sm:text-[13px] truncate max-w-[180px]" title={lec.teacherName || (lec.teacherEmail ? lec.teacherEmail.split('@')[0] : 'Assigned')}>
+              {lec.teacherName || (lec.teacherEmail ? lec.teacherEmail.split('@')[0].replace(/\d+$/, '').split(/[._-]/).map((p: string) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ') : 'Teacher Assigned')}
             </span>
             {lec.room && (
               <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 text-slate-700 rounded-[2px] text-[8px] font-bold uppercase flex-shrink-0">
