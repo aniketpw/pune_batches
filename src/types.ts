@@ -87,7 +87,8 @@ export type AppView =
   | 'test-announcement'
   | 'city-test'
   | 'batch-overlook'
-  | 'mip-batches';
+  | 'mip-batches'
+  | 'audit-sheet';
 
 export interface CustomModuleConfig {
   id: AppView;
@@ -163,4 +164,29 @@ export interface ExtraClassScheduleResponse {
     total: number;
   };
 }
+
+export interface AuditRecord {
+  id: string;
+  subsheet: string;
+  branch: string;
+  batchName: string;
+  subjectName: string;
+  lecStartTime: string;
+  finalBm: string;
+  errors: string;
+  hasError: boolean;
+  rowIndex: number;
+  rawRow: Record<string, string>;
+}
+
+export interface AuditSheetResponse {
+  spreadsheetId: string;
+  spreadsheetTitle: string;
+  subsheets: string[];
+  totalPuneCount: number;
+  errorCount: number;
+  branches: string[];
+  records: AuditRecord[];
+}
+
 

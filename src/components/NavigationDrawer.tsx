@@ -12,7 +12,8 @@ import {
   Database,
   ExternalLink,
   Sparkles,
-  Check
+  Check,
+  FileSpreadsheet
 } from 'lucide-react';
 import { AppView } from '../types';
 
@@ -77,6 +78,13 @@ const NAV_ITEMS: NavItem[] = [
     subtitle: 'Most Important Program batches',
     icon: Target,
     badge: 'Live Sheet',
+  },
+  {
+    id: 'audit-sheet',
+    title: 'Audit Sheet',
+    subtitle: 'Pendency, notes, video & teacher audit',
+    icon: FileSpreadsheet,
+    badge: 'Pune Only',
   },
 ];
 

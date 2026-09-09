@@ -1646,6 +1646,15 @@ app.use((req, _res, next) => {
       gid: '529627573',
       badge: 'MIP',
       description: 'Most Important Program (MIP) Batches, Mentors & Allocations'
+    },
+    'audit-sheet': {
+      id: 'audit-sheet',
+      title: 'Audit Sheet',
+      shortTitle: 'Audit Sheet',
+      spreadsheetId: '1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k',
+      gid: '1232755258',
+      badge: 'Audit',
+      description: 'Academic & Content Audit for Pune Batches'
     }
   };
 
@@ -1846,6 +1855,214 @@ app.use((req, _res, next) => {
     } catch (err: any) {
       console.error("API Error (/api/extra-classes/mark-done):", err);
       res.status(500).json({ error: err.message || "Failed to mark extra class status in Google Sheets." });
+    }
+  });
+
+  // ==========================================
+  // Audit Sheet Aggregator for Pune Centers
+  // Spreadsheet ID: 1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k
+  // Subsheets: Pendency, Topic, Video, Notes, Content, Teacher
+  // Columns: branch (Center), batch_name, subject_name, lec_start time, final bm, Errors
+  // Filter: Pune Branches Only
+  // ==========================================
+  const AUDIT_SPREADSHEET_ID = "1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k";
+  const auditSheetCache = new Map<string, { data: any; timestamp: number }>();
+
+  function isPuneBranch(branch: string): boolean {
+    if (!branch) return false;
+    const b = branch.toLowerCase().trim().replace(/[^a-z0-9]/g, " ");
+    const puneKeywords = [
+      "pcmc", "pimpri", "hadapsar", "viman", "vimannagar", 
+      "fc", "fcroad", "fergusson", "kothrud", "kothurd", "tc", "tuition", "pune"
+    ];
+    const tokens = b.split(/\s+/).filter(Boolean);
+    return puneKeywords.some((kw) => b.includes(kw) || tokens.includes(kw));
+  }
+
+  function normalizePuneBranchName(branch: string): string {
+    const b = (branch || "").trim();
+    const lower = b.toLowerCase();
+    if (lower.includes("pcmc") || lower.includes("pimpri")) return "PCMC VP";
+    if (lower.includes("hadapsar")) return "HADAPSAR";
+    if (lower.includes("viman")) return "VIMAN NAGAR VP";
+    if (lower.includes("fc") || lower.includes("fergusson")) return "FC ROAD";
+    if (lower.includes("kothrud") || lower.includes("kothurd")) return "KOTHRUD";
+    if (lower.includes("tc") || lower.includes("tuition")) return "TC";
+    return b || "Pune Center";
+  }
+
+  app.get("/api/audit-sheet", async (req, res) => {
+    try {
+      const forceRefresh = req.query.refresh === "true";
+      const cacheKey = `audit-sheet-${AUDIT_SPREADSHEET_ID}`;
+      const cached = auditSheetCache.get(cacheKey);
+      if (!forceRefresh && cached && Date.now() - cached.timestamp < 3 * 60 * 1000) {
+        return res.json(cached.data);
+      }
+
+      const auth = getGoogleAuth(req);
+      const sheets = google.sheets({ version: "v4", auth });
+
+      // 1. Fetch metadata to discover tabs
+      const metaRes = await sheets.spreadsheets.get({
+        spreadsheetId: AUDIT_SPREADSHEET_ID,
+      });
+
+      const allSheets = metaRes.data.sheets || [];
+      const spreadsheetTitle = metaRes.data.properties?.title || "Audit Sheet";
+
+      // User specified target subsheets: Pendency, topic, video, notes, content, teacher
+      const TARGET_SUBSHEETS = ["pendency", "topic", "video", "notes", "content", "teacher"];
+
+      const matchedSheets = allSheets.filter((s: any) => {
+        const title = (s.properties?.title || "").trim().toLowerCase();
+        return TARGET_SUBSHEETS.some((target) => title.includes(target));
+      });
+
+      // If no sheet matches the exact pattern, fallback to first available sheets
+      const sheetsToQuery = matchedSheets.length > 0 ? matchedSheets : allSheets.slice(0, 8);
+
+      // 2. Concurrently fetch data from target subsheets
+      const sheetDataResults = await Promise.all(
+        sheetsToQuery.map(async (sheet: any) => {
+          const sheetTitle = sheet.properties?.title || "Sheet1";
+          try {
+            const valRes = await sheets.spreadsheets.values.get({
+              spreadsheetId: AUDIT_SPREADSHEET_ID,
+              range: `'${sheetTitle}'!A1:ZZ`,
+            });
+            return {
+              sheetTitle,
+              rows: valRes.data.values || [],
+            };
+          } catch (err: any) {
+            console.warn(`[Audit Sheet] Error fetching sheet '${sheetTitle}':`, err.message);
+            return { sheetTitle, rows: [] };
+          }
+        })
+      );
+
+      const allPuneRecords: any[] = [];
+      const branchesSet = new Set<string>();
+      const subsheetsFound: string[] = [];
+
+      for (const { sheetTitle, rows } of sheetDataResults) {
+        if (!rows || rows.length < 2) continue;
+        subsheetsFound.push(sheetTitle);
+
+        // Detect header row (first row with >= 2 non-empty cells)
+        let headerRowIndex = 0;
+        for (let i = 0; i < Math.min(rows.length, 10); i++) {
+          const nonEmpty = (rows[i] || []).filter((c: any) => String(c || "").trim() !== "");
+          if (nonEmpty.length >= 2) {
+            headerRowIndex = i;
+            break;
+          }
+        }
+
+        const headerRow = (rows[headerRowIndex] || []).map((h: any) => String(h || "").trim());
+        const headersLower = headerRow.map((h: string) => h.toLowerCase().replace(/[^a-z0-9]/g, " "));
+
+        let branchIdx = -1;
+        let batchIdx = -1;
+        let subjectIdx = -1;
+        let timeIdx = -1;
+        let bmIdx = -1;
+        let errorIdx = -1;
+
+        headersLower.forEach((h: string, idx: number) => {
+          if (branchIdx === -1 && (h.includes("branch") || h.includes("center") || h.includes("centre") || h.includes("location"))) {
+            branchIdx = idx;
+          } else if (batchIdx === -1 && (h.includes("batch name") || h.includes("batch_name") || h.includes("batch code") || (h.includes("batch") && !h.includes("manager")))) {
+            batchIdx = idx;
+          } else if (subjectIdx === -1 && (h.includes("subject name") || h.includes("subject_name") || h.includes("subject") || h === "sub")) {
+            subjectIdx = idx;
+          } else if (timeIdx === -1 && (h.includes("lec start time") || h.includes("lec_start") || h.includes("start time") || h.includes("lecture time") || h.includes("in time") || h === "time" || h.includes("slot"))) {
+            timeIdx = idx;
+          } else if (bmIdx === -1 && (h.includes("final bm") || h.includes("final_bm") || h.includes("batch manager") || h === "bm" || h.includes("bm name") || h.includes("manager"))) {
+            bmIdx = idx;
+          } else if (errorIdx === -1 && (h.includes("error") || h.includes("errors") || h.includes("remarks") || h.includes("issue") || h.includes("pendency") || h.includes("status"))) {
+            errorIdx = idx;
+          }
+        });
+
+        // Fallback default indices if specific columns weren't identified
+        if (branchIdx === -1) branchIdx = 0;
+        if (batchIdx === -1) batchIdx = 1;
+        if (subjectIdx === -1) subjectIdx = 2;
+
+        for (let r = headerRowIndex + 1; r < rows.length; r++) {
+          const row = rows[r] || [];
+          if (row.length === 0) continue;
+
+          const rawBranch = String(row[branchIdx] || "").trim();
+          const rawBatch = String(row[batchIdx] || "").trim();
+
+          if (!rawBranch && !rawBatch) continue;
+
+          // Header repeated check
+          if (rawBranch.toLowerCase().includes("branch") && rawBatch.toLowerCase().includes("batch")) continue;
+
+          // CRITICAL REQUIREMENT: Filter ONLY Pune Branches
+          if (!isPuneBranch(rawBranch)) {
+            continue;
+          }
+
+          const normalizedBranch = normalizePuneBranchName(rawBranch);
+          branchesSet.add(normalizedBranch);
+
+          const rawSubject = subjectIdx >= 0 ? String(row[subjectIdx] || "").trim() : "";
+          const rawTime = timeIdx >= 0 ? String(row[timeIdx] || "").trim() : "";
+          const rawBm = bmIdx >= 0 ? String(row[bmIdx] || "").trim() : "";
+          const rawError = errorIdx >= 0 ? String(row[errorIdx] || "").trim() : "";
+
+          const hasError = !!rawError && !["no", "none", "nil", "ok", "clean", "done", "na", "n/a", "-", "false", "true"].includes(rawError.toLowerCase());
+
+          // Build rawRow dictionary of all original columns
+          const rawRowObj: Record<string, string> = {};
+          headerRow.forEach((colHeader: string, colIdx: number) => {
+            const key = colHeader || `Column_${colIdx + 1}`;
+            rawRowObj[key] = String(row[colIdx] || "").trim();
+          });
+
+          allPuneRecords.push({
+            id: `${sheetTitle}_${r + 1}`,
+            subsheet: sheetTitle,
+            branch: normalizedBranch,
+            batchName: rawBatch,
+            subjectName: rawSubject,
+            lecStartTime: rawTime,
+            finalBm: rawBm,
+            errors: rawError,
+            hasError,
+            rowIndex: r + 1,
+            rawRow: rawRowObj,
+          });
+        }
+      }
+
+      const totalPuneCount = allPuneRecords.length;
+      const errorCount = allPuneRecords.filter((r) => r.hasError).length;
+
+      const payload = {
+        spreadsheetId: AUDIT_SPREADSHEET_ID,
+        spreadsheetTitle,
+        subsheets: subsheetsFound,
+        totalPuneCount,
+        errorCount,
+        branches: Array.from(branchesSet).sort(),
+        records: allPuneRecords,
+      };
+
+      auditSheetCache.set(cacheKey, {
+        data: payload,
+        timestamp: Date.now(),
+      });
+
+      res.json(payload);
+    } catch (err: any) {
+      console.error("API Error (/api/audit-sheet):", err);
+      res.status(500).json({ error: err.message || "Failed to fetch audit sheet data." });
     }
   });
 

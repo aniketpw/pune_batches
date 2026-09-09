@@ -15,6 +15,7 @@ import NavigationDrawer from './components/NavigationDrawer';
 import GenericSheetView from './components/GenericSheetView';
 import ExtraClassView from './components/ExtraClassView';
 import BatchOverlookView from './components/BatchOverlookView';
+import AuditSheetView from './components/AuditSheetView';
 import { 
   Search, 
   LogOut, 
@@ -116,6 +117,11 @@ export const MODULE_METAS: Record<AppView, { title: string; subtitle: string; ba
     title: 'MIP Batches',
     subtitle: 'Most Important Program (MIP) Batches, Mentors & Allocations',
     badge: 'MIP',
+  },
+  'audit-sheet': {
+    title: 'Audit Sheet',
+    subtitle: 'Academic, Notes, Video & Content Audit for Pune Batches',
+    badge: 'Audit',
   },
 };
 
@@ -1723,6 +1729,13 @@ export default function App() {
       ) : activeView === 'extra-class' ? (
         <div className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:px-8 xl:px-12">
           <ExtraClassView
+            authToken={token}
+            onBackToBatches={() => setActiveView('batches')}
+          />
+        </div>
+      ) : activeView === 'audit-sheet' ? (
+        <div className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:px-8 xl:px-12">
+          <AuditSheetView
             authToken={token}
             onBackToBatches={() => setActiveView('batches')}
           />
