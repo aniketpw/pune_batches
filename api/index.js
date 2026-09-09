@@ -3601,12 +3601,39 @@ function computeLectureStatus(startTimeStr, endTimeStr, isToday, now) {
 var rawDbCache = /* @__PURE__ */ new Map();
 var RAW_DB_CACHE_TTL_MS = 10 * 60 * 1e3;
 var spreadsheetTitleCache = /* @__PURE__ */ new Map();
-var PUBLISHED_TIMETABLE_CSV_SOURCES = {
-  TC: {
+var PUBLISHED_TIMETABLE_CSV_SOURCES = [
+  {
     title: "TC Raw_DB (published CSV)",
-    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYz_RE56iI12cRH3jG2SLwwpGyS7-DRgVQ-W97mRyVvf-jNRdMsGW0lieGE7myHzLI3kdkA1DLJi9i/pub?gid=101475223&single=true&output=csv"
+    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYz_RE56iI12cRH3jG2SLwwpGyS7-DRgVQ-W97mRyVvf-jNRdMsGW0lieGE7myHzLI3kdkA1DLJi9i/pub?gid=101475223&single=true&output=csv",
+    aliases: ["TC", "TUITION CENTER"]
+  },
+  {
+    title: "PCMC Raw_DB (published CSV)",
+    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ2FCicMq4o1fk2W1-Sub14oFl04Whi0_hvDbvTFAT5tzzLtD7-xRsFJoqBVxCH0ibXk_hLJWTSJ2zZ/pub?gid=101475223&single=true&output=csv",
+    aliases: ["PCMC", "PCMC VP", "PIMPRI", "PUNE PIMPRI VIDYAPEETH"]
+  },
+  {
+    title: "NalStop / Kothrud Raw_DB (published CSV)",
+    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vQNS6ppzBowTFTRwNZRidr_t1e2xNPGF1Go_2cAe_EzhXt-C-olaZFtJ5XwTZDgZikweCISTAHLxfaL/pub?gid=101475223&single=true&output=csv",
+    aliases: ["NALSTOP", "NAL STOP", "KOTHURD", "KOTHRUD", "PUNE NALSTOP VIDYAPEETH"]
+  },
+  {
+    title: "S41 SIP Raw_DB (published CSV)",
+    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vQWco9sYBwphJn3p9QU3ktsYhQG-gYQF1GC0toaypo6RYWz2ScGVcL71sHE4JI8_rhtAvz3tTcxzuD3/pub?gid=101475223&single=true&output=csv",
+    aliases: ["S41", "S41 SIP", "SHRIPATRAO BHOSALE"]
+  },
+  {
+    title: "S94 SIP Raw_DB (published CSV)",
+    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vTpEb9hQE4HDom5bVjHhdNgSW0v3kN0xb0FlpTWYrbeehzYTszfGbRNKeMl3Xu5vlHiSHcO101VNqrW/pub?gid=101475223&single=true&output=csv",
+    aliases: ["S94", "S94 SIP", "ASTON PUBLIC SCHOOL"]
+  },
+  {
+    title: "S98 SIP Raw_DB (published CSV)",
+    url: "https://docs.google.com/spreadsheets/d/e/2PACX-1vTT9zaGTXatMDjE2GgWP-ZUi65MXVJyHoxfgxS-eeTyvSxmVACSeSlRNjsPxx6sqgG0-P6L_r0TlISa/pub?gid=101475223&single=true&output=csv",
+    aliases: ["S98", "S98 SIP", "DNYANTIRTH"]
   }
-};
+];
+var PUBLISHED_BATCH_DIRECTORY_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSZyAic-q2LoVXUTvHtafdOy9uc1KVt-4SNzruVARVevRbWjLq_38RLvJkSel-jOtXnWMAPlLkpQQpb/pub?output=csv";
 var DEFAULT_BATCH_SPREADSHEET_ID = "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
 var DEFAULT_BATCH_WORKSPACES = [
   ["PCMC VP"],
@@ -3638,8 +3665,16 @@ function hasRawDbLayout(rows) {
     return dayHeader.includes("day") && dateHeader.includes("date") && batchHeader.includes("batch");
   });
 }
-function getPublishedTimetableSource(center) {
-  return PUBLISHED_TIMETABLE_CSV_SOURCES[(center || "").trim().toUpperCase()] || null;
+function getPublishedTimetableSource(center, batchCode = "") {
+  const normalizedCenter = (center || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+  const byCenter = normalizedCenter ? PUBLISHED_TIMETABLE_CSV_SOURCES.find((source) => source.aliases.some((alias) => {
+    const normalizedAlias = alias.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+    return normalizedCenter === normalizedAlias || normalizedCenter.includes(normalizedAlias);
+  })) : null;
+  if (byCenter) return byCenter;
+  const code = (batchCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const sourceAlias = code.startsWith("T27") ? "TC" : code.startsWith("S41") ? "S41" : code.startsWith("S94") ? "S94" : code.startsWith("S98") ? "S98" : code.startsWith("27") ? "PCMC" : "";
+  return sourceAlias ? PUBLISHED_TIMETABLE_CSV_SOURCES.find((source) => source.aliases.includes(sourceAlias)) || null : null;
 }
 async function fetchPublishedRawDbWithCache(source, forceRefresh = false) {
   const cacheKey = `published:${source.url}`;
@@ -3674,6 +3709,19 @@ async function fetchDefaultBatchWorkspacesCsv(spreadsheetId, authToken) {
     })
   );
   return workspaces.every((workspace) => workspace !== null) ? workspaces : null;
+}
+async function fetchPublishedBatchDirectoryCsv() {
+  try {
+    const response = await fetch(PUBLISHED_BATCH_DIRECTORY_CSV_URL);
+    if (!response.ok) return null;
+    const rows = parseCsvRows(await response.text());
+    const header = rows[0] || [];
+    const hasBatchName = header.some((cell) => String(cell || "").trim().toLowerCase().includes("batch name"));
+    if (!hasBatchName || rows.length < 2) return null;
+    return [{ tabName: "Published Batches", rows }];
+  } catch {
+    return null;
+  }
 }
 async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false, authToken) {
   const cached = rawDbCache.get(spreadsheetId);
@@ -4206,10 +4254,11 @@ app.get("/api/batches", async (req, res) => {
     const sheets = google.sheets({ version: "v4", auth });
     const bmMap = await resolveBmMap(sheets, spreadsheetId, token);
     const csvWorkspaces = await fetchDefaultBatchWorkspacesCsv(spreadsheetId, token);
+    const publishedDirectory = !csvWorkspaces && spreadsheetId === DEFAULT_BATCH_SPREADSHEET_ID ? await fetchPublishedBatchDirectoryCsv() : null;
     const targetTabs = [];
     const rowsByTab = /* @__PURE__ */ new Map();
-    if (csvWorkspaces) {
-      for (const workspace of csvWorkspaces) {
+    if (csvWorkspaces || publishedDirectory) {
+      for (const workspace of csvWorkspaces || publishedDirectory || []) {
         targetTabs.push(workspace.tabName);
         rowsByTab.set(workspace.tabName, workspace.rows);
       }
@@ -5285,7 +5334,7 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
     let spreadsheetTitle = "";
     let foundLectures = [];
     let resolvedCenter = center || "";
-    const publishedSource = getPublishedTimetableSource(center);
+    const publishedSource = getPublishedTimetableSource(center, batchCode);
     if (!searchAll && publishedSource) {
       try {
         const published = await fetchPublishedRawDbWithCache(publishedSource, forceRefresh);
