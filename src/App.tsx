@@ -722,6 +722,11 @@ export default function App() {
     setShowAiCopilot(true);
   };
 
+  const handleCloseAiCopilot = () => {
+    setShowAiCopilot(false);
+    setSelectedAiBatch(null);
+  };
+
   return (
     <div className="min-h-screen bg-[#FAF9F5] flex flex-col font-sans text-slate-800">
       {/* Top Banner / Navbar */}
@@ -779,7 +784,15 @@ export default function App() {
           {/* AI Timetable & Schedule Finder toggle (Desktop only, mobile has floating side FAB) */}
           <button
             type="button"
-            onClick={() => setShowAiCopilot(!showAiCopilot)}
+            onClick={() => {
+              if (showAiCopilot && !selectedAiBatch) {
+                setShowAiCopilot(false);
+              } else {
+                setSelectedAiBatch(null);
+                setAiBatchLoadKey(k => k + 1);
+                setShowAiCopilot(true);
+              }
+            }}
             className={`hidden lg:flex p-2 rounded-[2px] border transition-all cursor-pointer items-center gap-1.5 ${
               showAiCopilot 
                 ? 'bg-indigo-600 text-white border-indigo-600 text-[10px] font-black uppercase tracking-wider shadow-xs' 
@@ -1664,7 +1677,7 @@ export default function App() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                onClick={() => setShowAiCopilot(false)}
+                onClick={handleCloseAiCopilot}
                 onTouchMove={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -1685,7 +1698,7 @@ export default function App() {
                   <AiCopilotPanel
                     batch={selectedAiBatch}
                     authToken={token}
-                    onClose={() => setShowAiCopilot(false)}
+                    onClose={handleCloseAiCopilot}
                     allBatches={allBatches}
                     onSelectBatch={(batch) => setSelectedAiBatch(batch as Batch | null)}
                     batchLoadKey={aiBatchLoadKey}
@@ -1701,16 +1714,15 @@ export default function App() {
           <div className="fixed bottom-6 right-4 z-40 lg:hidden animate-in fade-in zoom-in-90 duration-200">
             <button
               type="button"
-              onClick={() => setShowAiCopilot(true)}
+              onClick={() => {
+                setSelectedAiBatch(null);
+                setAiBatchLoadKey(k => k + 1);
+                setShowAiCopilot(true);
+              }}
               className="w-12 h-12 rounded-full bg-white/90 hover:bg-white text-indigo-600 border border-indigo-200/90 shadow-xl shadow-indigo-950/15 backdrop-blur-md flex items-center justify-center active:scale-90 transition-all cursor-pointer group relative"
               title="Open AI Timetable & Schedule Search"
             >
               <Sparkles className="w-5.5 h-5.5 text-indigo-600 fill-indigo-100 group-hover:scale-110 transition-transform" />
-              {selectedAiBatch && (
-                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-indigo-600 border-2 border-white rounded-full flex items-center justify-center text-[7px] font-bold text-white shadow-xs">
-                  ✓
-                </span>
-              )}
             </button>
           </div>
         )}

@@ -82,22 +82,21 @@ export default function AiCopilotPanel({
 
   // Synchronize internal activeBatch with incoming batch prop (& force re-load via batchLoadKey)
   useEffect(() => {
-    if (batch) {
-      // Reset all stale state when batch changes from external click
-      setScheduleData(null);
-      setExplanation('');
-      setMessages([]);
-      setSelectedDayFilter('TODAY');
-      setExtraClassDayFilter('ALL');
-      setExpandedNoticeId(null);
-      setCopiedNoticeId(null);
-      setSearchQuery('');
-      setShowSearchDropdown(false);
-      contentScrollRef.current?.scrollTo({ top: 0 });
-    }
+    // Reset all stale data & filters on every batch sync
+    setScheduleData(null);
+    setExplanation('');
+    setMessages([]);
+    setSelectedDayFilter('TODAY');
+    setExtraClassDayFilter('ALL');
+    setExpandedNoticeId(null);
+    setCopiedNoticeId(null);
+    setSearchQuery('');
+    setShowSearchDropdown(false);
+    contentScrollRef.current?.scrollTo({ top: 0 });
+
     setActiveBatch(batch);
     if (!batch && (autoFocusSearch || window.innerWidth > 768)) {
-      searchInputRef.current?.focus();
+      setTimeout(() => searchInputRef.current?.focus(), 60);
     }
   }, [batch, autoFocusSearch, batchLoadKey]);
 
@@ -757,6 +756,14 @@ export default function AiCopilotPanel({
     });
   };
 
+  const handlePanelClose = () => {
+    setActiveBatch(null);
+    setScheduleData(null);
+    setExplanation('');
+    setMessages([]);
+    onClose();
+  };
+
   return (
     <motion.div 
       drag="y"
@@ -766,7 +773,7 @@ export default function AiCopilotPanel({
       dragElastic={{ top: 0, bottom: 0.7 }}
       onDragEnd={(_, info) => {
         if (info.offset.y > 60 || info.velocity.y > 250) {
-          onClose();
+          handlePanelClose();
         }
       }}
       className="bg-white rounded-t-2xl sm:rounded-[2px] border border-[#E2E1DA] flex flex-col h-full w-full lg:w-[420px] xl:w-[460px] flex-shrink-0 overflow-hidden shadow-2xl lg:shadow-sm overscroll-contain" 
@@ -779,7 +786,7 @@ export default function AiCopilotPanel({
             dragControls.start(e);
           }
         }}
-        onClick={onClose}
+        onClick={handlePanelClose}
         className="w-full pt-3 pb-2.5 flex flex-col items-center justify-center cursor-grab active:cursor-grabbing touch-none select-none lg:hidden bg-slate-900 border-b border-slate-800 active:bg-slate-800 transition-colors"
         title="Swipe down or tap to close"
       >
@@ -819,22 +826,8 @@ export default function AiCopilotPanel({
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {activeBatch && (
-            <button
-              type="button"
-              onClick={() => {
-                setActiveBatch(null);
-                setSearchQuery('');
-                setTimeout(() => searchInputRef.current?.focus(), 50);
-              }}
-              className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-[2px] text-[8px] font-black uppercase border border-slate-700 cursor-pointer transition-all"
-              title="Search and switch to another batch schedule"
-            >
-              Switch Batch
-            </button>
-          )}
           <button 
-            onClick={onClose} 
+            onClick={handlePanelClose} 
             className="p-1.5 hover:bg-white/10 rounded-[2px] text-slate-400 hover:text-white transition-all cursor-pointer flex-shrink-0"
             title="Close panel"
           >
@@ -975,39 +968,6 @@ export default function AiCopilotPanel({
           </div>
         ) : (
           <div className="space-y-4">
-
-            {/* Active Batch Banner with Reset */}
-            <div className="flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-[2px] px-3 py-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-600 flex-shrink-0" />
-                <div className="min-w-0">
-                  <p className="text-[10px] font-black uppercase tracking-wider text-indigo-700 truncate">
-                    {activeBatch?.displayName || activeBatch?.fullName}
-                  </p>
-                  {activeBatch?.tabName && (
-                    <p className="text-[8px] font-bold text-indigo-500 uppercase tracking-wider">{activeBatch.tabName}</p>
-                  )}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveBatch(null);
-                  setScheduleData(null);
-                  setExplanation('');
-                  setMessages([]);
-                  setSelectedDayFilter('TODAY');
-                  setExtraClassDayFilter('ALL');
-                  setExpandedNoticeId(null);
-                  onSelectBatch?.(null as unknown as Batch);
-                  setTimeout(() => searchInputRef.current?.focus(), 100);
-                }}
-                className="px-2 py-1 bg-white hover:bg-indigo-100 border border-indigo-200 text-[9px] font-black uppercase tracking-wider text-indigo-600 rounded-[2px] cursor-pointer transition-colors flex items-center gap-1 flex-shrink-0 shadow-xs"
-              >
-                <Search className="w-3 h-3" />
-                <span>New Search</span>
-              </button>
-            </div>
             
             {/* SECTION 1: LIVE TIMETABLE / SCHEDULE CARD (FROM Raw_DB) */}
             <div className="bg-white rounded-[2px] border border-[#E2E1DA] overflow-hidden shadow-xs">
