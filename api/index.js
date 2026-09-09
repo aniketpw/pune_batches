@@ -3529,23 +3529,25 @@ var TIMETABLE_SHEET_IDS = [
 var centerTimetableMap = {};
 var TIMETABLE_TITLE_CACHE_TTL_MS = 15 * 60 * 1e3;
 var timetableWorkbookTitlesCache = null;
-async function getTimetableWorkbookTitles(sheets) {
+async function getTimetableWorkbookTitles(auth) {
   if (timetableWorkbookTitlesCache && Date.now() - timetableWorkbookTitlesCache.timestamp < TIMETABLE_TITLE_CACHE_TTL_MS) {
     return timetableWorkbookTitlesCache.data;
   }
+  const drive = google.drive({ version: "v3", auth });
   const titles = await Promise.all(
     TIMETABLE_SHEET_IDS.map(async (sId) => {
       try {
-        const metaRes = await sheets.spreadsheets.get({
-          spreadsheetId: sId,
-          fields: "properties.title"
+        const fileRes = await drive.files.get({
+          fileId: sId,
+          fields: "name"
         });
-        return { sId, title: metaRes.data?.properties?.title || sId };
+        return { sId, title: fileRes.data?.name || sId };
       } catch {
         return { sId, title: sId };
       }
     })
   );
+  titles.forEach(({ sId, title }) => spreadsheetTitleCache.set(sId, title));
   timetableWorkbookTitlesCache = { data: titles, timestamp: Date.now() };
   return titles;
 }
@@ -3599,7 +3601,46 @@ function computeLectureStatus(startTimeStr, endTimeStr, isToday, now) {
 var rawDbCache = /* @__PURE__ */ new Map();
 var RAW_DB_CACHE_TTL_MS = 10 * 60 * 1e3;
 var spreadsheetTitleCache = /* @__PURE__ */ new Map();
-async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false) {
+var DEFAULT_BATCH_SPREADSHEET_ID = "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+var DEFAULT_BATCH_WORKSPACES = [
+  ["PCMC VP"],
+  ["VIMAN NAGAR VP", "VIMAN NAGAR"],
+  ["TC"],
+  ["HADAPSAR"],
+  ["FC ROAD"],
+  ["KOTHURD", "KOTHRUD"]
+];
+async function fetchSheetCsv(spreadsheetId, sheetName, authToken) {
+  try {
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+    const response = await fetch(csvUrl, { headers });
+    if (!response.ok) return null;
+    const text = await response.text();
+    if (!text || /^\s*</.test(text)) return null;
+    const rows = parseCsvRows(text);
+    return rows.length > 0 ? rows : null;
+  } catch {
+    return null;
+  }
+}
+async function fetchDefaultBatchWorkspacesCsv(spreadsheetId, authToken) {
+  if (spreadsheetId !== DEFAULT_BATCH_SPREADSHEET_ID) return null;
+  const workspaces = await Promise.all(
+    DEFAULT_BATCH_WORKSPACES.map(async (names) => {
+      for (const tabName of names) {
+        const rows = await fetchSheetCsv(spreadsheetId, tabName, authToken);
+        const headerLooksValid = rows?.[0]?.some(
+          (cell) => String(cell || "").trim().toLowerCase().includes("batch")
+        );
+        if (rows && headerLooksValid) return { tabName, rows };
+      }
+      return null;
+    })
+  );
+  return workspaces.every((workspace) => workspace !== null) ? workspaces : null;
+}
+async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false, authToken) {
   const cached = rawDbCache.get(spreadsheetId);
   if (!forceRefresh && cached && cached.rows && cached.rows.length > 0 && Date.now() - cached.timestamp < RAW_DB_CACHE_TTL_MS) {
     return { title: cached.title, rows: cached.rows };
@@ -3607,6 +3648,20 @@ async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false) 
   const knownTitle = cached?.title || spreadsheetTitleCache.get(spreadsheetId);
   let spreadsheetTitle = knownTitle || spreadsheetId;
   let targetSheetTitle = "Raw_DB";
+  try {
+    const csvRows = await fetchSheetCsv(spreadsheetId, "Raw_DB", authToken);
+    if (csvRows) {
+      rawDbCache.set(spreadsheetId, {
+        spreadsheetId,
+        title: spreadsheetTitle,
+        rows: csvRows,
+        timestamp: Date.now()
+      });
+      return { title: spreadsheetTitle, rows: csvRows };
+    }
+  } catch (csvErr) {
+    console.warn(`[Raw_DB] CSV export failed for ${spreadsheetId}:`, csvErr.message);
+  }
   try {
     const metaRes = await sheets.spreadsheets.get({
       spreadsheetId,
@@ -4111,27 +4166,39 @@ app.get("/api/batches", async (req, res) => {
     if (cachedResponse) batchesResponseCache.delete(cacheKey);
     const sheets = google.sheets({ version: "v4", auth });
     const bmMap = await resolveBmMap(sheets, spreadsheetId, token);
-    const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
-    const sheetsList = metaRes.data.sheets || [];
+    const csvWorkspaces = await fetchDefaultBatchWorkspacesCsv(spreadsheetId, token);
     const targetTabs = [];
-    sheetsList.forEach((sheet) => {
-      const name = sheet.properties?.title || "";
-      if (name && name.trim().toLowerCase() !== "ref") {
-        targetTabs.push(name);
+    const rowsByTab = /* @__PURE__ */ new Map();
+    if (csvWorkspaces) {
+      for (const workspace of csvWorkspaces) {
+        targetTabs.push(workspace.tabName);
+        rowsByTab.set(workspace.tabName, workspace.rows);
       }
-    });
+    } else {
+      const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
+      const sheetsList = metaRes.data.sheets || [];
+      sheetsList.forEach((sheet) => {
+        const name = sheet.properties?.title || "";
+        if (name && name.trim().toLowerCase() !== "ref") {
+          targetTabs.push(name);
+        }
+      });
+      const ranges = targetTabs.map((tabName) => `'${tabName.replace(/'/g, "''")}'!A:Z`);
+      const batchValuesRes = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId,
+        ranges
+      });
+      const valueRanges = batchValuesRes.data.valueRanges || [];
+      targetTabs.forEach((tabName, index) => {
+        rowsByTab.set(tabName, valueRanges[index]?.values || []);
+      });
+    }
     const batchesData = {};
     const masterBms = /* @__PURE__ */ new Set();
-    const ranges = targetTabs.map((tabName) => `'${tabName.replace(/'/g, "''")}'!A:Z`);
-    const batchValuesRes = await sheets.spreadsheets.values.batchGet({
-      spreadsheetId,
-      ranges
-    });
-    const valueRanges = batchValuesRes.data.valueRanges || [];
     for (let tabIndex = 0; tabIndex < targetTabs.length; tabIndex++) {
       const tabName = targetTabs[tabIndex];
       try {
-        const rows = valueRanges[tabIndex]?.values || [];
+        const rows = rowsByTab.get(tabName) || [];
         const sheetData = [];
         const headerRow = rows[0] || [];
         let batchCodeIdx = 0;
@@ -5150,6 +5217,7 @@ async function fetchAuditSheetWithCache(sheets, forceRefresh = false) {
 app.get("/api/timetable/batch-schedule", async (req, res) => {
   try {
     const auth = getGoogleAuth(req);
+    const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
     const center = req.query.center || "";
     const batchCode = req.query.batchCode || "";
     let spreadsheetId = req.query.spreadsheetId || "";
@@ -5169,7 +5237,7 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
         spreadsheetTitle = centerTimetableMap[center].spreadsheetTitle || "";
       }
       if (!candidateId && center) {
-        const workbookTitles = await getTimetableWorkbookTitles(sheets);
+        const workbookTitles = await getTimetableWorkbookTitles(auth);
         const titleMatch = workbookTitles.find((item) => doesSheetTitleMatchCenter(item.title, center));
         if (titleMatch) {
           candidateId = titleMatch.sId;
@@ -5185,7 +5253,7 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       }
       if (candidateId) {
         try {
-          const { title, rows } = await fetchRawDbWithCache(sheets, candidateId, forceRefresh);
+          const { title, rows } = await fetchRawDbWithCache(sheets, candidateId, forceRefresh, token);
           spreadsheetTitle = title;
           const parsed = parseRawDbRows(rows);
           const matches = parsed.filter((l) => isBatchMatch(l.batchCode, l.batchFaculty, batchCode));
@@ -5204,7 +5272,7 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       const results = await Promise.all(
         sheetsToSearch.map(async (sId) => {
           try {
-            const { title, rows } = await fetchRawDbWithCache(sheets, sId, forceRefresh);
+            const { title, rows } = await fetchRawDbWithCache(sheets, sId, forceRefresh, token);
             const parsed = parseRawDbRows(rows);
             const matches = parsed.filter((l) => isBatchMatch(l.batchCode, l.batchFaculty, batchCode));
             return { sId, title, matches, totalParsed: parsed.length };
@@ -5377,9 +5445,8 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
 app.get("/api/timetable/mappings", async (req, res) => {
   try {
     const auth = getGoogleAuth(req);
-    const sheets = google.sheets({ version: "v4", auth });
     const centers = req.query.centers?.split(",").filter(Boolean) || [];
-    const sheetsMeta = await getTimetableWorkbookTitles(sheets);
+    const sheetsMeta = await getTimetableWorkbookTitles(auth);
     for (const c of centers) {
       if (!centerTimetableMap[c] || centerTimetableMap[c].matchedConfidence === "unassigned") {
         const match = sheetsMeta.find((meta) => doesSheetTitleMatchCenter(meta.title, c));

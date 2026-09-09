@@ -130,7 +130,7 @@ app.use((req, _res, next) => {
    * map every workspace to its timetable once, while keeping page load quota
    * usage low. Raw_DB data is fetched only after a user opens a batch.
    */
-  async function getTimetableWorkbookTitles(sheets: any): Promise<{ sId: string; title: string }[]> {
+  async function getTimetableWorkbookTitles(auth: any): Promise<{ sId: string; title: string }[]> {
     if (
       timetableWorkbookTitlesCache &&
       Date.now() - timetableWorkbookTitlesCache.timestamp < TIMETABLE_TITLE_CACHE_TTL_MS
@@ -138,20 +138,24 @@ app.use((req, _res, next) => {
       return timetableWorkbookTitlesCache.data;
     }
 
+    // Drive metadata has a separate, much larger quota. It avoids spending a
+    // Sheets read just to discover a workbook name.
+    const drive = google.drive({ version: "v3", auth });
     const titles = await Promise.all(
       TIMETABLE_SHEET_IDS.map(async (sId) => {
         try {
-          const metaRes = await sheets.spreadsheets.get({
-            spreadsheetId: sId,
-            fields: "properties.title",
+          const fileRes = await drive.files.get({
+            fileId: sId,
+            fields: "name",
           });
-          return { sId, title: metaRes.data?.properties?.title || sId };
+          return { sId, title: fileRes.data?.name || sId };
         } catch {
           return { sId, title: sId };
         }
       })
     );
 
+    titles.forEach(({ sId, title }) => spreadsheetTitleCache.set(sId, title));
     timetableWorkbookTitlesCache = { data: titles, timestamp: Date.now() };
     return titles;
   }
@@ -225,11 +229,72 @@ app.use((req, _res, next) => {
   const rawDbCache = new Map<string, CachedRawDb>();
   const RAW_DB_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes TTL
   const spreadsheetTitleCache = new Map<string, string>();
+  const DEFAULT_BATCH_SPREADSHEET_ID = "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+  const DEFAULT_BATCH_WORKSPACES = [
+    ["PCMC VP"],
+    ["VIMAN NAGAR VP", "VIMAN NAGAR"],
+    ["TC"],
+    ["HADAPSAR"],
+    ["FC ROAD"],
+    ["KOTHURD", "KOTHRUD"],
+  ];
+
+  /** Read a named sheet through the Docs CSV endpoint (no Sheets API read). */
+  async function fetchSheetCsv(
+    spreadsheetId: string,
+    sheetName: string,
+    authToken?: string
+  ): Promise<any[][] | null> {
+    try {
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+      const headers: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      const response = await fetch(csvUrl, { headers });
+      if (!response.ok) return null;
+
+      const text = await response.text();
+      if (!text || /^\s*</.test(text)) return null;
+      const rows = parseCsvRows(text);
+      return rows.length > 0 ? rows : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The production batches workbook has a stable set of center tabs. Loading
+   * them as CSV means the dashboard consumes zero Sheets read quota. Custom
+   * workbooks retain the API fallback below because their tab names are not
+   * known in advance.
+   */
+  async function fetchDefaultBatchWorkspacesCsv(
+    spreadsheetId: string,
+    authToken?: string
+  ): Promise<{ tabName: string; rows: any[][] }[] | null> {
+    if (spreadsheetId !== DEFAULT_BATCH_SPREADSHEET_ID) return null;
+
+    const workspaces = await Promise.all(
+      DEFAULT_BATCH_WORKSPACES.map(async (names) => {
+        for (const tabName of names) {
+          const rows = await fetchSheetCsv(spreadsheetId, tabName, authToken);
+          const headerLooksValid = rows?.[0]?.some((cell: any) =>
+            String(cell || "").trim().toLowerCase().includes("batch")
+          );
+          if (rows && headerLooksValid) return { tabName, rows };
+        }
+        return null;
+      })
+    );
+
+    return workspaces.every((workspace) => workspace !== null)
+      ? workspaces as { tabName: string; rows: any[][] }[]
+      : null;
+  }
 
   async function fetchRawDbWithCache(
     sheets: any,
     spreadsheetId: string,
-    forceRefresh = false
+    forceRefresh = false,
+    authToken?: string
   ): Promise<{ title: string; rows: any[][] }> {
     const cached = rawDbCache.get(spreadsheetId);
     if (!forceRefresh && cached && cached.rows && cached.rows.length > 0 && Date.now() - cached.timestamp < RAW_DB_CACHE_TTL_MS) {
@@ -240,7 +305,27 @@ app.use((req, _res, next) => {
     let spreadsheetTitle = knownTitle || spreadsheetId;
     let targetSheetTitle = "Raw_DB";
 
-    // Fetch spreadsheet metadata to dynamically find the exact Raw_DB tab name
+    // Every timetable workbook uses the same Raw_DB tab. Read it through the
+    // Google Docs CSV export endpoint first; this does not consume the
+    // sheets.googleapis.com read quota that the app previously exhausted.
+    try {
+      const csvRows = await fetchSheetCsv(spreadsheetId, "Raw_DB", authToken);
+      if (csvRows) {
+        rawDbCache.set(spreadsheetId, {
+          spreadsheetId,
+          title: spreadsheetTitle,
+          rows: csvRows,
+          timestamp: Date.now(),
+        });
+        return { title: spreadsheetTitle, rows: csvRows };
+      }
+    } catch (csvErr: any) {
+      console.warn(`[Raw_DB] CSV export failed for ${spreadsheetId}:`, csvErr.message);
+    }
+
+    // Compatibility fallback for a workbook whose Raw_DB tab has been renamed
+    // or whose export is unavailable. This is intentionally not the normal
+    // path, so standard timetable viewing does not spend Sheets read quota.
     try {
       const metaRes = await sheets.spreadsheets.get({
         spreadsheetId,
@@ -916,37 +1001,50 @@ app.use((req, _res, next) => {
       // Step 1: Resolve Manager (BM) Map (Cached & Resilient with Infallible Seed Baseline)
       const bmMap = await resolveBmMap(sheets, spreadsheetId, token);
 
-      // Step 2: Read all tabs to identify target workspaces
-      const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
-      const sheetsList = metaRes.data.sheets || [];
+      // Step 2: Prefer direct CSV exports for the standard six workspaces.
+      // They bypass sheets.googleapis.com entirely. Unknown/custom workbooks
+      // use the API fallback so their dynamically named tabs keep working.
+      const csvWorkspaces = await fetchDefaultBatchWorkspacesCsv(spreadsheetId, token);
       const targetTabs: string[] = [];
+      const rowsByTab = new Map<string, any[][]>();
 
-      sheetsList.forEach((sheet) => {
-        const name = sheet.properties?.title || "";
-        // Include all sheets except the 'Ref'/reference sheet
-        if (name && name.trim().toLowerCase() !== "ref") {
-          targetTabs.push(name);
+      if (csvWorkspaces) {
+        for (const workspace of csvWorkspaces) {
+          targetTabs.push(workspace.tabName);
+          rowsByTab.set(workspace.tabName, workspace.rows);
         }
-      });
+      } else {
+        const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
+        const sheetsList = metaRes.data.sheets || [];
+        sheetsList.forEach((sheet) => {
+          const name = sheet.properties?.title || "";
+          // Include all sheets except the 'Ref'/reference sheet
+          if (name && name.trim().toLowerCase() !== "ref") {
+            targetTabs.push(name);
+          }
+        });
+
+        // One batched request is the compatibility fallback for custom
+        // workbooks, rather than a request per workspace.
+        const ranges = targetTabs.map((tabName) => `'${tabName.replace(/'/g, "''")}'!A:Z`);
+        const batchValuesRes = await sheets.spreadsheets.values.batchGet({
+          spreadsheetId,
+          ranges,
+        });
+        const valueRanges = batchValuesRes.data.valueRanges || [];
+        targetTabs.forEach((tabName, index) => {
+          rowsByTab.set(tabName, valueRanges[index]?.values || []);
+        });
+      }
 
       const batchesData: Record<string, any[]> = {};
       const masterBms = new Set<string>();
 
-      // Read every workspace range in one API request. The former loop made
-      // one values.get request per tab, which could exhaust the user's Sheets
-      // read quota on a normal page load or retry.
-      const ranges = targetTabs.map((tabName) => `'${tabName.replace(/'/g, "''")}'!A:Z`);
-      const batchValuesRes = await sheets.spreadsheets.values.batchGet({
-        spreadsheetId,
-        ranges,
-      });
-      const valueRanges = batchValuesRes.data.valueRanges || [];
-
-      // Step 3: Parse each workspace from the batched response
+      // Step 3: Parse each workspace response
       for (let tabIndex = 0; tabIndex < targetTabs.length; tabIndex++) {
         const tabName = targetTabs[tabIndex];
         try {
-          const rows = valueRanges[tabIndex]?.values || [];
+          const rows = rowsByTab.get(tabName) || [];
           const sheetData: any[] = [];
 
           // Dynamic column index lookup
@@ -2188,6 +2286,7 @@ app.use((req, _res, next) => {
   app.get("/api/timetable/batch-schedule", async (req, res) => {
     try {
       const auth = getGoogleAuth(req);
+      const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
       const center = (req.query.center as string) || "";
       const batchCode = (req.query.batchCode as string) || "";
       let spreadsheetId = (req.query.spreadsheetId as string) || "";
@@ -2216,7 +2315,7 @@ app.use((req, _res, next) => {
         // completes. Resolve the workspace title here as a safe fallback so a
         // known center reads its own Raw_DB instead of scanning all 9 files.
         if (!candidateId && center) {
-          const workbookTitles = await getTimetableWorkbookTitles(sheets);
+          const workbookTitles = await getTimetableWorkbookTitles(auth);
           const titleMatch = workbookTitles.find((item) => doesSheetTitleMatchCenter(item.title, center));
           if (titleMatch) {
             candidateId = titleMatch.sId;
@@ -2233,7 +2332,7 @@ app.use((req, _res, next) => {
 
         if (candidateId) {
           try {
-            const { title, rows } = await fetchRawDbWithCache(sheets, candidateId, forceRefresh);
+            const { title, rows } = await fetchRawDbWithCache(sheets, candidateId, forceRefresh, token);
             spreadsheetTitle = title;
             const parsed = parseRawDbRows(rows);
             const matches = parsed.filter((l) => isBatchMatch(l.batchCode, l.batchFaculty, batchCode));
@@ -2257,7 +2356,7 @@ app.use((req, _res, next) => {
         const results = await Promise.all(
           sheetsToSearch.map(async (sId) => {
             try {
-              const { title, rows } = await fetchRawDbWithCache(sheets, sId, forceRefresh);
+              const { title, rows } = await fetchRawDbWithCache(sheets, sId, forceRefresh, token);
               const parsed = parseRawDbRows(rows);
               const matches = parsed.filter((l) => isBatchMatch(l.batchCode, l.batchFaculty, batchCode));
               return { sId, title, matches, totalParsed: parsed.length };
@@ -2455,12 +2554,11 @@ app.use((req, _res, next) => {
   app.get("/api/timetable/mappings", async (req, res) => {
     try {
       const auth = getGoogleAuth(req);
-      const sheets = google.sheets({ version: "v4", auth });
       const centers = (req.query.centers as string)?.split(",").filter(Boolean) || [];
 
       // Mapping only needs workbook titles; the helper keeps those titles
       // cached and never hydrates Raw_DB rows during alignment.
-      const sheetsMeta = await getTimetableWorkbookTitles(sheets);
+      const sheetsMeta = await getTimetableWorkbookTitles(auth);
 
       // Attempt smart title matching for centers that don't have an exact match yet
       for (const c of centers) {
