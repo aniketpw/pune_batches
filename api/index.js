@@ -3650,7 +3650,13 @@ async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false, 
   let targetSheetTitle = "Raw_DB";
   try {
     const csvRows = await fetchSheetCsv(spreadsheetId, "Raw_DB", authToken);
-    if (csvRows) {
+    const hasRawDbLayout = csvRows?.slice(0, 5).some((row) => {
+      const dayHeader = String(row[0] || "").trim().toLowerCase();
+      const dateHeader = String(row[1] || "").trim().toLowerCase();
+      const batchHeader = String(row[8] || "").trim().toLowerCase();
+      return dayHeader.includes("day") && dateHeader.includes("date") && batchHeader.includes("batch");
+    });
+    if (csvRows && hasRawDbLayout) {
       rawDbCache.set(spreadsheetId, {
         spreadsheetId,
         title: spreadsheetTitle,
@@ -3785,6 +3791,10 @@ function normalizeDateStr(dateStr) {
   return s;
 }
 function isDateOrDayMatchingToday(rowDate, rowDay, todayDateStr, todayDayStr, nowIst) {
+  const currentYear = String(nowIst.getFullYear());
+  const rowIso = parseDateToIso(rowDate, currentYear, rowDay);
+  const todayIso = parseDateToIso(todayDateStr, currentYear);
+  if (rowIso && todayIso) return rowIso === todayIso;
   const normRowDate = normalizeDateStr(rowDate);
   const normToday = normalizeDateStr(todayDateStr);
   const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
@@ -3940,7 +3950,7 @@ function filterCurrentOrLatestWeekLectures(lectures, todayIso) {
   const isoDates = [];
   for (const lec of lectures) {
     if (lec.lectureDate) {
-      const iso = parseDateToIso(lec.lectureDate, currentYear);
+      const iso = parseDateToIso(lec.lectureDate, currentYear, lec.day);
       if (iso) {
         dateMap.set(lec, iso);
         if (!isoDates.includes(iso)) isoDates.push(iso);
@@ -4565,7 +4575,7 @@ function parseCsvRows(csvText) {
   }
   return rows;
 }
-function parseDateToIso(rawDate, currentYearStr) {
+function parseDateToIso(rawDate, currentYearStr, expectedDay) {
   if (!rawDate) return null;
   const str = String(rawDate).trim();
   if (!str) return null;
@@ -4606,13 +4616,29 @@ function parseDateToIso(rawDate, currentYearStr) {
       return `${y}-${m}-${d}`;
     }
   }
-  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
-  if (dmyMatch) {
-    const d = dmyMatch[1].padStart(2, "0");
-    const m = dmyMatch[2].padStart(2, "0");
-    let y = dmyMatch[3];
-    if (y.length === 2) y = `20${y}`;
-    return `${y}-${m}-${d}`;
+  const numericDateMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+  if (numericDateMatch) {
+    const first = Number(numericDateMatch[1]);
+    const second = Number(numericDateMatch[2]);
+    let year = numericDateMatch[3];
+    if (year.length === 2) year = `20${year}`;
+    const toIso = (day, month) => {
+      const candidate = new Date(Date.UTC(Number(year), month - 1, day, 12, 0, 0));
+      if (candidate.getUTCFullYear() !== Number(year) || candidate.getUTCMonth() !== month - 1 || candidate.getUTCDate() !== day) return null;
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    };
+    const candidates = [toIso(first, second), toIso(second, first)].filter(Boolean);
+    if (candidates.length === 0) return null;
+    const targetDay = (expectedDay || "").trim().substring(0, 3).toUpperCase();
+    if (targetDay) {
+      const weekdayByIndex = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+      const dayMatch = candidates.find((iso) => {
+        const [y, m, d] = iso.split("-").map(Number);
+        return weekdayByIndex[new Date(Date.UTC(y, m - 1, d, 12, 0, 0)).getUTCDay()] === targetDay;
+      });
+      if (dayMatch) return dayMatch;
+    }
+    return candidates[0];
   }
   const num = Number(str);
   if (!isNaN(num) && num > 4e4 && num < 6e4) {

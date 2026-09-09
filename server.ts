@@ -310,7 +310,13 @@ app.use((req, _res, next) => {
     // sheets.googleapis.com read quota that the app previously exhausted.
     try {
       const csvRows = await fetchSheetCsv(spreadsheetId, "Raw_DB", authToken);
-      if (csvRows) {
+      const hasRawDbLayout = csvRows?.slice(0, 5).some((row) => {
+        const dayHeader = String(row[0] || "").trim().toLowerCase();
+        const dateHeader = String(row[1] || "").trim().toLowerCase();
+        const batchHeader = String(row[8] || "").trim().toLowerCase();
+        return dayHeader.includes("day") && dateHeader.includes("date") && batchHeader.includes("batch");
+      });
+      if (csvRows && hasRawDbLayout) {
         rawDbCache.set(spreadsheetId, {
           spreadsheetId,
           title: spreadsheetTitle,
@@ -475,6 +481,11 @@ app.use((req, _res, next) => {
     todayDayStr: string,
     nowIst: Date
   ): boolean {
+    const currentYear = String(nowIst.getFullYear());
+    const rowIso = parseDateToIso(rowDate, currentYear, rowDay);
+    const todayIso = parseDateToIso(todayDateStr, currentYear);
+    if (rowIso && todayIso) return rowIso === todayIso;
+
     const normRowDate = normalizeDateStr(rowDate);
     const normToday = normalizeDateStr(todayDateStr);
     const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
@@ -703,7 +714,9 @@ app.use((req, _res, next) => {
 
     for (const lec of lectures) {
       if (lec.lectureDate) {
-        const iso = parseDateToIso(lec.lectureDate, currentYear);
+        // CSV exports may use either DD/MM/YYYY or MM/DD/YYYY. Column A's
+        // weekday lets the parser select the date that belongs to this row.
+        const iso = parseDateToIso(lec.lectureDate, currentYear, lec.day);
         if (iso) {
           dateMap.set(lec, iso);
           if (!isoDates.includes(iso)) isoDates.push(iso);
@@ -1503,7 +1516,7 @@ app.use((req, _res, next) => {
     return rows;
   }
 
-  function parseDateToIso(rawDate: string, currentYearStr: string): string | null {
+  function parseDateToIso(rawDate: string, currentYearStr: string, expectedDay?: string): string | null {
     if (!rawDate) return null;
     const str = String(rawDate).trim();
     if (!str) return null;
@@ -1538,14 +1551,42 @@ app.use((req, _res, next) => {
       }
     }
 
-    // Check DD/MM/YYYY or DD-MM-YYYY
-    const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
-    if (dmyMatch) {
-      const d = dmyMatch[1].padStart(2, '0');
-      const m = dmyMatch[2].padStart(2, '0');
-      let y = dmyMatch[3];
-      if (y.length === 2) y = `20${y}`;
-      return `${y}-${m}-${d}`;
+    // CSV exports can localize a date as either DD/MM/YYYY or MM/DD/YYYY.
+    // Raw_DB includes a weekday in column A, so use it to disambiguate dates
+    // such as 9/7/2026 before filtering the current weekly timetable.
+    const numericDateMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+    if (numericDateMatch) {
+      const first = Number(numericDateMatch[1]);
+      const second = Number(numericDateMatch[2]);
+      let year = numericDateMatch[3];
+      if (year.length === 2) year = `20${year}`;
+
+      const toIso = (day: number, month: number): string | null => {
+        const candidate = new Date(Date.UTC(Number(year), month - 1, day, 12, 0, 0));
+        if (
+          candidate.getUTCFullYear() !== Number(year) ||
+          candidate.getUTCMonth() !== month - 1 ||
+          candidate.getUTCDate() !== day
+        ) return null;
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      };
+
+      const candidates = [toIso(first, second), toIso(second, first)].filter(Boolean) as string[];
+      if (candidates.length === 0) return null;
+
+      const targetDay = (expectedDay || "").trim().substring(0, 3).toUpperCase();
+      if (targetDay) {
+        const weekdayByIndex = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+        const dayMatch = candidates.find((iso) => {
+          const [y, m, d] = iso.split("-").map(Number);
+          return weekdayByIndex[new Date(Date.UTC(y, m - 1, d, 12, 0, 0)).getUTCDay()] === targetDay;
+        });
+        if (dayMatch) return dayMatch;
+      }
+
+      // Raw_DB is maintained in the Indian DD/MM convention; use that when
+      // the weekday is unavailable or both representations are plausible.
+      return candidates[0];
     }
 
     // Check Excel serial number (e.g. 46274)
