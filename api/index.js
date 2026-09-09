@@ -141,38 +141,68 @@ var RAW_DB_CACHE_TTL_MS = 10 * 60 * 1e3;
 var spreadsheetTitleCache = /* @__PURE__ */ new Map();
 async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false) {
   const cached = rawDbCache.get(spreadsheetId);
-  if (!forceRefresh && cached && Date.now() - cached.timestamp < RAW_DB_CACHE_TTL_MS) {
+  if (!forceRefresh && cached && cached.rows && cached.rows.length > 0 && Date.now() - cached.timestamp < RAW_DB_CACHE_TTL_MS) {
     return { title: cached.title, rows: cached.rows };
   }
   const knownTitle = cached?.title || spreadsheetTitleCache.get(spreadsheetId);
-  const metaPromise = knownTitle ? Promise.resolve({ data: { properties: { title: knownTitle } } }) : sheets.spreadsheets.get({
-    spreadsheetId,
-    fields: "properties.title"
-  }).catch(() => ({ data: { properties: { title: spreadsheetId } } }));
-  const valuesPromise = sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "'Raw_DB'!A1:AL1000"
-  }).catch((err) => {
-    console.warn(`Failed to fetch Raw_DB for ${spreadsheetId}:`, err.message);
-    if (cached && cached.rows && cached.rows.length > 0) {
-      console.log(`[Raw_DB] Returning cached rows for ${spreadsheetId} due to error/quota.`);
-      return { data: { values: cached.rows } };
+  let spreadsheetTitle = knownTitle || spreadsheetId;
+  let targetSheetTitle = "Raw_DB";
+  try {
+    const metaRes = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: "properties.title,sheets.properties(sheetId,title)"
+    });
+    if (metaRes.data?.properties?.title) {
+      spreadsheetTitle = metaRes.data.properties.title;
+      spreadsheetTitleCache.set(spreadsheetId, spreadsheetTitle);
     }
-    return { data: { values: [] } };
-  });
-  const [metaRes, valuesRes] = await Promise.all([metaPromise, valuesPromise]);
-  const title = metaRes.data?.properties?.title || knownTitle || spreadsheetId;
-  if (title && !spreadsheetTitleCache.has(spreadsheetId)) {
-    spreadsheetTitleCache.set(spreadsheetId, title);
+    const sheetsList = metaRes.data?.sheets || [];
+    if (sheetsList.length > 0) {
+      const matchTab = sheetsList.find((s) => {
+        const t = (s.properties?.title || "").trim().toLowerCase();
+        return t === "raw_db" || t.includes("raw_db") || t.includes("raw db") || t.includes("raw-db") || t.includes("timetable");
+      });
+      if (matchTab?.properties?.title) {
+        targetSheetTitle = matchTab.properties.title;
+      } else if (sheetsList[0]?.properties?.title) {
+        targetSheetTitle = sheetsList[0].properties.title;
+      }
+    }
+  } catch (metaErr) {
+    console.warn(`Could not get metadata for ${spreadsheetId}:`, metaErr.message);
   }
-  const rows = valuesRes.data?.values || (cached?.rows || []);
-  rawDbCache.set(spreadsheetId, {
-    spreadsheetId,
-    title,
-    rows,
-    timestamp: Date.now()
-  });
-  return { title, rows };
+  let rows = [];
+  try {
+    const valuesRes = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${targetSheetTitle}'!A:AL`
+    });
+    rows = valuesRes.data?.values || [];
+  } catch (valErr) {
+    console.warn(`Failed to fetch '${targetSheetTitle}'!A:AL for ${spreadsheetId}:`, valErr.message);
+    try {
+      const fallbackRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'${targetSheetTitle}'!A1:AL5000`
+      });
+      rows = fallbackRes.data?.values || [];
+    } catch (fbErr) {
+      console.warn(`Fallback range also failed for ${spreadsheetId}:`, fbErr.message);
+      if (cached && cached.rows && cached.rows.length > 0) {
+        console.log(`[Raw_DB] Returning cached rows for ${spreadsheetId} due to API error.`);
+        return { title: cached.title, rows: cached.rows };
+      }
+    }
+  }
+  if (rows && rows.length > 0) {
+    rawDbCache.set(spreadsheetId, {
+      spreadsheetId,
+      title: spreadsheetTitle,
+      rows,
+      timestamp: Date.now()
+    });
+  }
+  return { title: spreadsheetTitle, rows };
 }
 function getCenterKeywords(name) {
   const clean = (name || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ");
@@ -283,11 +313,19 @@ function isBatchMatch(rowBatch, rowBatchFaculty, targetBatch) {
       return true;
     }
   }
+  const rowCore = extractCoreAlphanumeric(rowBatch);
+  if (rowCore && rowCore.length >= 4 && targetClean.includes(rowCore)) {
+    return true;
+  }
   const stripCenter = (s) => s.replace(/^(27|S98|\d{2})/, "");
   const targetNoCenter = stripCenter(targetClean);
   const rowNoCenter = stripCenter(rowBatchClean);
-  if (targetNoCenter.length >= 4 && rowNoCenter.length >= 4) {
-    if (targetNoCenter === rowNoCenter || rowNoCenter.includes(targetNoCenter) || targetNoCenter.includes(rowNoCenter)) {
+  const facultyNoCenter = stripCenter(rowFacultyClean);
+  if (targetNoCenter.length >= 4) {
+    if (rowNoCenter.length >= 4 && (targetNoCenter === rowNoCenter || rowNoCenter.includes(targetNoCenter) || targetNoCenter.includes(rowNoCenter))) {
+      return true;
+    }
+    if (facultyNoCenter.length >= 4 && (facultyNoCenter.includes(targetNoCenter) || targetNoCenter.includes(facultyNoCenter))) {
       return true;
     }
   }
@@ -298,7 +336,7 @@ function parseRawDbRows(rows) {
   let headerRowIdx = 0;
   for (let r = 0; r < Math.min(rows.length, 5); r++) {
     const rCells = (rows[r] || []).map((c) => (c || "").toString().trim().toLowerCase());
-    const hasDay = rCells.some((c) => c === "day");
+    const hasDay = rCells.some((c) => c === "day" || c.includes("day"));
     const hasDateOrBatch = rCells.some((c) => c.includes("date") || c.includes("batch") || c.includes("start") || c.includes("time"));
     if (hasDay && hasDateOrBatch) {
       headerRowIdx = r;
@@ -316,16 +354,16 @@ function parseRawDbRows(rows) {
   let facultyCodeIdx = 9;
   let subjectIdx = 34;
   let teacherEmailIdx = 36;
-  for (let idx = 0; idx <= 11 && idx < headerRow.length; idx++) {
+  for (let idx = 0; idx <= 15 && idx < headerRow.length; idx++) {
     const val = headerRow[idx];
     const h = (val || "").toString().trim().toLowerCase();
-    if (h === "day") dayIdx = idx;
+    if (h === "day" || h.includes("day of week")) dayIdx = idx;
     else if (h.includes("date") || h.includes("lecture date")) dateIdx = idx;
-    else if (h.includes("start time") || h === "start") startIdx = idx;
-    else if (h.includes("end time") || h === "end") endIdx = idx;
-    else if (h.includes("batch & faculty") || h.includes("faculty & batch") || h.includes("batch & fac")) batchFacultyIdx = idx;
+    else if (h.includes("start time") || h === "start" || h.includes("in time")) startIdx = idx;
+    else if (h.includes("end time") || h === "end" || h.includes("out time")) endIdx = idx;
+    else if (h.includes("batch & faculty") || h.includes("faculty & batch") || h.includes("batch & fac") || h.includes("batch/fac")) batchFacultyIdx = idx;
     else if (h === "time" || h === "time range") timeIdx = idx;
-    else if (h === "batch code" || h.includes("batch") && !h.includes("&") && !h.includes("faculty")) batchCodeIdx = idx;
+    else if (h === "batch code" || h === "batch" || h === "batch name" || h.includes("batch") && !h.includes("&") && !h.includes("faculty")) batchCodeIdx = idx;
     else if (h === "faculty code" || h.includes("faculty") && !h.includes("&") && !h.includes("batch")) facultyCodeIdx = idx;
   }
   for (let idx = 12; idx < headerRow.length; idx++) {
@@ -338,8 +376,17 @@ function parseRawDbRows(rows) {
   const result = [];
   for (let i = headerRowIdx + 1; i < rows.length; i++) {
     const row = rows[i] || [];
-    const batchCode = (row[batchCodeIdx] || "").toString().trim();
-    const batchFaculty = (row[batchFacultyIdx] || "").toString().trim();
+    let batchCode = (row[batchCodeIdx] || "").toString().trim();
+    let batchFaculty = (row[batchFacultyIdx] || "").toString().trim();
+    if (!batchCode && !batchFaculty) {
+      for (let c = 0; c <= 11 && c < row.length; c++) {
+        const val = (row[c] || "").toString().trim();
+        if (val.match(/(?:27-|S98-|\b)[A-Z]{2,4}\d{2,3}[A-Z0-9]{2,4}/i)) {
+          batchCode = val;
+          break;
+        }
+      }
+    }
     if (!batchCode && !batchFaculty) continue;
     let day = (row[dayIdx] || "").toString().trim();
     const lectureDate = (row[dateIdx] || "").toString().trim();
@@ -1522,28 +1569,31 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
           }
         })
       );
-      const matchedResult = results.find((r) => r.matches.length > 0);
-      if (matchedResult) {
-        foundLectures = matchedResult.matches;
-        spreadsheetId = matchedResult.sId;
-        spreadsheetTitle = matchedResult.title;
-        const knownCenters = ["PCMC VP", "HADAPSAR", "VIMAN NAGAR VP", "TC", "FC ROAD", "KOTHURD"];
-        for (const [cName, cMap] of Object.entries(centerTimetableMap)) {
-          if (cMap.spreadsheetId === matchedResult.sId) {
-            resolvedCenter = cName;
-            break;
-          }
-        }
-        if (!resolvedCenter) {
-          for (const kc of knownCenters) {
-            if (doesSheetTitleMatchCenter(matchedResult.title, kc)) {
-              resolvedCenter = kc;
+      const allMatches = results.flatMap((r) => r.matches);
+      if (allMatches.length > 0) {
+        foundLectures = deduplicateLectures(allMatches);
+        const matchedResult = results.find((r) => r.matches.length > 0);
+        if (matchedResult) {
+          spreadsheetId = matchedResult.sId;
+          spreadsheetTitle = matchedResult.title;
+          const knownCenters = ["PCMC VP", "HADAPSAR", "VIMAN NAGAR VP", "TC", "FC ROAD", "KOTHURD"];
+          for (const [cName, cMap] of Object.entries(centerTimetableMap)) {
+            if (cMap.spreadsheetId === matchedResult.sId) {
+              resolvedCenter = cName;
               break;
             }
           }
-        }
-        if (!resolvedCenter) {
-          resolvedCenter = matchedResult.title || "Pune Center";
+          if (!resolvedCenter) {
+            for (const kc of knownCenters) {
+              if (doesSheetTitleMatchCenter(matchedResult.title, kc)) {
+                resolvedCenter = kc;
+                break;
+              }
+            }
+          }
+          if (!resolvedCenter) {
+            resolvedCenter = matchedResult.title || "Pune Center";
+          }
         }
       } else {
         if (!spreadsheetId) {
@@ -1605,10 +1655,10 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
           dateTag
         };
       });
-      const activeExtra = allMatchingExtra.filter((ec) => !ec.isPast || ec.isToday);
-      if (activeExtra.length > 0) {
+      const recentExtra = relevantExtra;
+      if (recentExtra.length > 0) {
         const { now } = getIstDateInfo();
-        for (const ec of activeExtra) {
+        for (const ec of recentExtra) {
           const extraLecture = {
             day: ec.day || "Scheduled",
             lectureDate: ec.displayDate || ec.rawDate || "",
@@ -1630,8 +1680,8 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
           };
           foundLectures.push(extraLecture);
         }
-        if (!resolvedCenter && activeExtra[0]?.center) {
-          resolvedCenter = activeExtra[0].center;
+        if (!resolvedCenter && recentExtra[0]?.center) {
+          resolvedCenter = recentExtra[0].center;
         }
         if (!spreadsheetTitle) {
           spreadsheetTitle = "Raw_DB & Extra Class Sheet";

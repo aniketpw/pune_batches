@@ -1690,6 +1690,7 @@ export default function App() {
                     allBatches={allBatches}
                     onSelectBatch={(batch) => setSelectedAiBatch(batch as Batch | null)}
                     batchLoadKey={aiBatchLoadKey}
+                    onReauth={handleLogin}
                   />
                 </div>
               </motion.aside>

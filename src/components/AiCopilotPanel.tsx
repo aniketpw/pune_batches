@@ -27,6 +27,7 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { Batch, BatchScheduleResponse, LectureSchedule, BatchAuditIssue, BatchExtraClassItem } from '../types';
+import { googleSignIn } from '../firebase';
 
 interface AiCopilotPanelProps {
   batch: Batch | null;
@@ -37,6 +38,7 @@ interface AiCopilotPanelProps {
   autoFocusSearch?: boolean;
   /** Incrementing key to force re-fetch even when the same batch is clicked again */
   batchLoadKey?: number;
+  onReauth?: () => Promise<void> | void;
 }
 
 interface ChatMessage {
@@ -51,11 +53,13 @@ export default function AiCopilotPanel({
   allBatches = [],
   onSelectBatch,
   autoFocusSearch = false,
-  batchLoadKey = 0
+  batchLoadKey = 0,
+  onReauth
 }: AiCopilotPanelProps) {
   const [activeBatch, setActiveBatch] = useState<Batch | null>(batch);
   const [scheduleData, setScheduleData] = useState<BatchScheduleResponse | null>(null);
   const [isScheduleLoading, setIsScheduleLoading] = useState<boolean>(false);
+  const [isSessionExpired, setIsSessionExpired] = useState<boolean>(false);
   const [selectedDayFilter, setSelectedDayFilter] = useState<string>('TODAY');
 
   // Search & Batch Switcher State
@@ -204,9 +208,12 @@ export default function AiCopilotPanel({
         }
         
         const scheduleRes = await fetch(scheduleUrl, { headers });
-        if (scheduleRes.ok) {
+        if (scheduleRes.status === 401) {
+          if (isMounted) setIsSessionExpired(true);
+        } else if (scheduleRes.ok) {
           const sData = await scheduleRes.json();
           if (isMounted) {
+            setIsSessionExpired(false);
             fetchedSchedule = sData;
             setScheduleData(sData);
             if (sData.center && (!activeBatch.tabName || activeBatch.tabName === '')) {
@@ -431,7 +438,10 @@ export default function AiCopilotPanel({
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
       const res = await fetch(scheduleUrl, { headers });
-      if (res.ok) {
+      if (res.status === 401) {
+        setIsSessionExpired(true);
+      } else if (res.ok) {
+        setIsSessionExpired(false);
         const sData = await res.json();
         setScheduleData(sData);
         if (sData.center && (!activeBatch.tabName || activeBatch.tabName === '')) {
@@ -927,6 +937,36 @@ export default function AiCopilotPanel({
 
       {/* Main Content Scrollable Area */}
       <div ref={contentScrollRef} className="flex-1 overflow-y-auto p-3.5 sm:p-4 space-y-4 bg-[#FAF9F5] overscroll-contain">
+        {isSessionExpired && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-[3px] flex items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0" />
+              <div className="text-xs text-red-900 leading-tight">
+                <p className="font-bold">Google Sheets Session Expired (401)</p>
+                <p className="text-[10.5px] text-red-700">Please re-authenticate to view live timetable & schedule data.</p>
+              </div>
+            </div>
+            <button
+              onClick={async () => {
+                try {
+                  if (onReauth) {
+                    await onReauth();
+                  } else {
+                    await googleSignIn();
+                  }
+                  setIsSessionExpired(false);
+                  handleRefreshSchedule();
+                } catch (e) {
+                  console.error('Re-auth error:', e);
+                }
+              }}
+              className="px-3 py-1.5 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold rounded text-[11px] uppercase tracking-wider cursor-pointer whitespace-nowrap shadow-xs transition-all flex-shrink-0"
+            >
+              Sign In Again
+            </button>
+          </div>
+        )}
+
         {!activeBatch ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
             <div className="p-3.5 bg-indigo-50 border border-indigo-100 rounded-full text-indigo-600">
