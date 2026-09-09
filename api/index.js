@@ -3934,7 +3934,10 @@ function deduplicateLectures(lectures) {
 }
 var cachedBmMap = { ...SEED_BM_MAP };
 var cachedBmMapTimestamp = Date.now();
+var cachedBmMapSpreadsheetId = "";
 var BM_MAP_CACHE_TTL = 15 * 60 * 1e3;
+var batchesResponseCache = /* @__PURE__ */ new Map();
+var BATCHES_RESPONSE_CACHE_TTL = 5 * 60 * 1e3;
 function parseCSVLine(line) {
   const result = [];
   let cur = "";
@@ -3954,6 +3957,9 @@ function parseCSVLine(line) {
   return result;
 }
 async function resolveBmMap(sheets, spreadsheetId, authToken, forceRefresh = false) {
+  if (!forceRefresh && cachedBmMapSpreadsheetId === spreadsheetId && Date.now() - cachedBmMapTimestamp < BM_MAP_CACHE_TTL) {
+    return { ...cachedBmMap };
+  }
   const bmMap = { ...SEED_BM_MAP, ...cachedBmMap || {} };
   const registerBm = (batchName, bmVal) => {
     if (!batchName || !bmVal) return;
@@ -4066,6 +4072,7 @@ async function resolveBmMap(sheets, spreadsheetId, authToken, forceRefresh = fal
   if (Object.keys(bmMap).length > 0) {
     cachedBmMap = bmMap;
     cachedBmMapTimestamp = Date.now();
+    cachedBmMapSpreadsheetId = spreadsheetId;
   }
   return bmMap;
 }
@@ -4074,6 +4081,12 @@ app.get("/api/batches", async (req, res) => {
     const auth = getGoogleAuth(req);
     const spreadsheetId = req.query.spreadsheetId || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const cacheKey = `${spreadsheetId}:${token || ""}`;
+    const cachedResponse = batchesResponseCache.get(cacheKey);
+    if (cachedResponse && Date.now() - cachedResponse.timestamp < BATCHES_RESPONSE_CACHE_TTL) {
+      return res.json(cachedResponse.data);
+    }
+    if (cachedResponse) batchesResponseCache.delete(cacheKey);
     const sheets = google.sheets({ version: "v4", auth });
     const bmMap = await resolveBmMap(sheets, spreadsheetId, token);
     const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
@@ -4087,13 +4100,16 @@ app.get("/api/batches", async (req, res) => {
     });
     const batchesData = {};
     const masterBms = /* @__PURE__ */ new Set();
-    for (const tabName of targetTabs) {
+    const ranges = targetTabs.map((tabName) => `'${tabName.replace(/'/g, "''")}'!A:Z`);
+    const batchValuesRes = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId,
+      ranges
+    });
+    const valueRanges = batchValuesRes.data.valueRanges || [];
+    for (let tabIndex = 0; tabIndex < targetTabs.length; tabIndex++) {
+      const tabName = targetTabs[tabIndex];
       try {
-        const rangeRes = await sheets.spreadsheets.values.get({
-          spreadsheetId,
-          range: `'${tabName}'!A:Z`
-        });
-        const rows = rangeRes.data.values || [];
+        const rows = valueRanges[tabIndex]?.values || [];
         const sheetData = [];
         const headerRow = rows[0] || [];
         let batchCodeIdx = 0;
@@ -4217,12 +4233,26 @@ app.get("/api/batches", async (req, res) => {
         batchesData[tabName] = [];
       }
     }
-    res.json({
+    const responsePayload = {
       batchesData,
       bms: Array.from(masterBms).sort()
+    };
+    batchesResponseCache.set(cacheKey, {
+      data: responsePayload,
+      timestamp: Date.now()
     });
+    res.json(responsePayload);
   } catch (error) {
     console.error("API Error (get-batches):", error);
+    const spreadsheetId = req.query.spreadsheetId || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+    const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const cacheKey = `${spreadsheetId}:${token || ""}`;
+    const staleResponse = batchesResponseCache.get(cacheKey);
+    const isQuotaError = error?.code === 429 || /quota|rate limit|too many requests/i.test(error?.message || "");
+    if (staleResponse && isQuotaError) {
+      console.warn("[Batches] Serving stale cached data after Sheets read failure.");
+      return res.json(staleResponse.data);
+    }
     res.status(error.message.includes("Authorization") ? 401 : 500).json({
       error: error.message || "An error occurred while loading sheets data."
     });
@@ -5315,8 +5345,11 @@ app.get("/api/timetable/mappings", async (req, res) => {
     const sheetsMeta = await Promise.all(
       TIMETABLE_SHEET_IDS.map(async (sId) => {
         try {
-          const { title } = await fetchRawDbWithCache(sheets, sId, false);
-          return { sId, title };
+          const metaRes = await sheets.spreadsheets.get({
+            spreadsheetId: sId,
+            fields: "properties.title"
+          });
+          return { sId, title: metaRes.data?.properties?.title || sId };
         } catch {
           return { sId, title: sId };
         }

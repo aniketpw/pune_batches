@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   googleSignIn, 
@@ -160,6 +160,7 @@ export default function App() {
   const [bms, setBms] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const batchesFetchInFlightRef = useRef(false);
 
   // Filter States
   const [activeTab, setActiveTab] = useState("PCMC VP");
@@ -330,8 +331,9 @@ export default function App() {
   // Fetch batches from Backend
   const fetchBatches = async (authToken?: string) => {
     const activeToken = authToken || token;
-    if (!activeToken) return;
+    if (!activeToken || batchesFetchInFlightRef.current) return;
 
+    batchesFetchInFlightRef.current = true;
     setIsLoading(true);
     setError(null);
     try {
@@ -357,12 +359,15 @@ export default function App() {
         setActiveTab(keys[0]);
       }
 
-      // Automatically fetch timetable mappings for all discovered centers
-      fetchTimetableMappings(keys, activeToken);
+      // Timetable mapping is intentionally loaded only from Settings /
+      // Re-align. Loading all nine Raw_DB workbooks during every app launch
+      // consumed the signed-in user's Sheets read quota before they opened AI
+      // Timetable.
     } catch (err: any) {
       console.error(err);
       setError(err.message || 'Connection error. Please ensure you have permission.');
     } finally {
+      batchesFetchInFlightRef.current = false;
       setIsLoading(false);
     }
   };

@@ -683,7 +683,14 @@ app.use((req, _res, next) => {
 
   let cachedBmMap: Record<string, string> = { ...SEED_BM_MAP };
   let cachedBmMapTimestamp = Date.now();
+  let cachedBmMapSpreadsheetId = "";
   const BM_MAP_CACHE_TTL = 15 * 60 * 1000; // 15 minutes TTL
+
+  // The main batches screen is opened and refreshed frequently. Cache its
+  // assembled response so a browser refresh does not repeat every Sheets read
+  // against the signed-in user's per-minute quota.
+  const batchesResponseCache = new Map<string, { data: any; timestamp: number }>();
+  const BATCHES_RESPONSE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   function parseCSVLine(line: string): string[] {
     const result: string[] = [];
@@ -705,6 +712,14 @@ app.use((req, _res, next) => {
   }
 
   async function resolveBmMap(sheets: any, spreadsheetId: string, authToken?: string, forceRefresh = false): Promise<Record<string, string>> {
+    if (
+      !forceRefresh &&
+      cachedBmMapSpreadsheetId === spreadsheetId &&
+      Date.now() - cachedBmMapTimestamp < BM_MAP_CACHE_TTL
+    ) {
+      return { ...cachedBmMap };
+    }
+
     const bmMap: Record<string, string> = { ...SEED_BM_MAP, ...(cachedBmMap || {}) };
 
     const registerBm = (batchName: string, bmVal: string) => {
@@ -837,6 +852,7 @@ app.use((req, _res, next) => {
     if (Object.keys(bmMap).length > 0) {
       cachedBmMap = bmMap;
       cachedBmMapTimestamp = Date.now();
+      cachedBmMapSpreadsheetId = spreadsheetId;
     }
 
     return bmMap;
@@ -848,6 +864,19 @@ app.use((req, _res, next) => {
       const auth = getGoogleAuth(req);
       const spreadsheetId = (req.query.spreadsheetId as string) || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
       const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+      // Scope cached data to this OAuth access token. This preserves the
+      // existing authorization boundary while still shielding repeated page
+      // loads by the same signed-in user.
+      const cacheKey = `${spreadsheetId}:${token || ""}`;
+      const cachedResponse = batchesResponseCache.get(cacheKey);
+
+      if (
+        cachedResponse &&
+        Date.now() - cachedResponse.timestamp < BATCHES_RESPONSE_CACHE_TTL
+      ) {
+        return res.json(cachedResponse.data);
+      }
+      if (cachedResponse) batchesResponseCache.delete(cacheKey);
 
       const sheets = google.sheets({ version: "v4", auth });
 
@@ -870,14 +899,21 @@ app.use((req, _res, next) => {
       const batchesData: Record<string, any[]> = {};
       const masterBms = new Set<string>();
 
-      // Step 3: Fetch batches from target workspaces
-      for (const tabName of targetTabs) {
+      // Read every workspace range in one API request. The former loop made
+      // one values.get request per tab, which could exhaust the user's Sheets
+      // read quota on a normal page load or retry.
+      const ranges = targetTabs.map((tabName) => `'${tabName.replace(/'/g, "''")}'!A:Z`);
+      const batchValuesRes = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId,
+        ranges,
+      });
+      const valueRanges = batchValuesRes.data.valueRanges || [];
+
+      // Step 3: Parse each workspace from the batched response
+      for (let tabIndex = 0; tabIndex < targetTabs.length; tabIndex++) {
+        const tabName = targetTabs[tabIndex];
         try {
-          const rangeRes = await sheets.spreadsheets.values.get({
-            spreadsheetId,
-            range: `'${tabName}'!A:Z`,
-          });
-          const rows = rangeRes.data.values || [];
+          const rows = valueRanges[tabIndex]?.values || [];
           const sheetData: any[] = [];
 
           // Dynamic column index lookup
@@ -1043,12 +1079,26 @@ app.use((req, _res, next) => {
         }
       }
 
-      res.json({
+      const responsePayload = {
         batchesData,
         bms: Array.from(masterBms).sort(),
+      };
+      batchesResponseCache.set(cacheKey, {
+        data: responsePayload,
+        timestamp: Date.now(),
       });
+      res.json(responsePayload);
     } catch (error: any) {
       console.error("API Error (get-batches):", error);
+      const spreadsheetId = (req.query.spreadsheetId as string) || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+      const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+      const cacheKey = `${spreadsheetId}:${token || ""}`;
+      const staleResponse = batchesResponseCache.get(cacheKey);
+      const isQuotaError = error?.code === 429 || /quota|rate limit|too many requests/i.test(error?.message || "");
+      if (staleResponse && isQuotaError) {
+        console.warn("[Batches] Serving stale cached data after Sheets read failure.");
+        return res.json(staleResponse.data);
+      }
       res.status(error.message.includes("Authorization") ? 401 : 500).json({
         error: error.message || "An error occurred while loading sheets data.",
       });
@@ -2356,12 +2406,17 @@ app.use((req, _res, next) => {
       const sheets = google.sheets({ version: "v4", auth });
       const centers = (req.query.centers as string)?.split(",").filter(Boolean) || [];
 
-      // Fetch titles for all 9 sheets in parallel
+      // Mapping only needs workbook titles. Do not hydrate every Raw_DB here:
+      // that would add a metadata read plus a full values read for each of the
+      // nine workbooks before the user has asked to view a timetable.
       const sheetsMeta = await Promise.all(
         TIMETABLE_SHEET_IDS.map(async (sId) => {
           try {
-            const { title } = await fetchRawDbWithCache(sheets, sId, false);
-            return { sId, title };
+            const metaRes = await sheets.spreadsheets.get({
+              spreadsheetId: sId,
+              fields: "properties.title",
+            });
+            return { sId, title: metaRes.data?.properties?.title || sId };
           } catch {
             return { sId, title: sId };
           }
