@@ -248,9 +248,7 @@ export default function AiCopilotPanel({
             bmEmail: activeBatch.bmEmail,
             todayLectures: (fetchedSchedule?.todayLectures && fetchedSchedule.todayLectures.length > 0)
               ? fetchedSchedule.todayLectures
-              : (fetchedSchedule?.allLectures || []).filter((l) => 
-                  getLectureDay(l) === (fetchedSchedule?.todayDay || new Date().toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Kolkata' })).toUpperCase().substring(0, 3)
-                ),
+              : (fetchedSchedule?.allLectures || []).filter((l) => l.isToday),
             allLectures: fetchedSchedule?.allLectures || [],
             auditIssues: fetchedSchedule?.auditIssues || [],
             extraClasses: fetchedSchedule?.extraClasses || [],
@@ -564,18 +562,16 @@ export default function AiCopilotPanel({
     return '';
   }, []);
 
+  // TODAY must be strictly what Raw_DB marks for today's DATE (column B match).
+  // Never fabricate "today" classes by weekday-name matching — that pulls in
+  // lectures from other weeks that don't exist in the sheet today.
   const currentTodayLectures = React.useMemo(() => {
     if (!scheduleData) return [];
     if (scheduleData.todayLectures && scheduleData.todayLectures.length > 0) {
       return scheduleData.todayLectures;
     }
-    const todayD3 = (scheduleData.todayDay || new Date().toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Kolkata' })).toUpperCase().substring(0, 3);
-    return (scheduleData.allLectures || []).filter((l) => {
-      if (l.isToday) return true;
-      const d3 = getLectureDay(l);
-      return d3 === todayD3;
-    });
-  }, [scheduleData, getLectureDay]);
+    return (scheduleData.allLectures || []).filter((l) => l.isToday);
+  }, [scheduleData]);
 
   const dayCounts = React.useMemo(() => {
     if (!scheduleData) return {} as Record<string, number>;

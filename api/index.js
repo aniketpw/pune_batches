@@ -3909,7 +3909,7 @@ function filterCurrentOrLatestWeekLectures(lectures, todayIso) {
   const sunIso = sunObj.toISOString().substring(0, 10);
   const currentWeekLectures = lectures.filter((lec) => {
     const iso = dateMap.get(lec);
-    if (!iso) return true;
+    if (!iso) return isoDates.length === 0;
     return iso >= monIso && iso <= sunIso;
   });
   const hasCurrentWeekDates = currentWeekLectures.some((l) => dateMap.has(l));
@@ -3927,7 +3927,7 @@ function filterCurrentOrLatestWeekLectures(lectures, todayIso) {
   const lSunIso = latestSun.toISOString().substring(0, 10);
   return lectures.filter((lec) => {
     const iso = dateMap.get(lec);
-    if (!iso) return true;
+    if (!iso) return isoDates.length === 0;
     return iso >= lMonIso && iso <= lSunIso;
   });
 }
@@ -3940,9 +3940,12 @@ function deduplicateLectures(lectures) {
   };
   for (const lec of lectures) {
     const cleanBatch = extractCoreBatchCode(lec.batchCode || lec.batchFaculty || "");
+    const cleanDate = (lec.lectureDate || "").toString().trim().toUpperCase();
     const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
     const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
-    const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}`;
+    const cleanSubject = (lec.subject || "").trim().toUpperCase();
+    const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
+    const slotKey = `${cleanBatch}_${cleanDate || cleanDay}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
     if (!seen.has(slotKey)) {
       seen.set(slotKey, lec);
     } else {

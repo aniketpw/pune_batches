@@ -620,7 +620,11 @@ app.use((req, _res, next) => {
     // 1. If any lectures belong to current week (Monday to Sunday around today), return ONLY current week lectures
     const currentWeekLectures = lectures.filter((lec) => {
       const iso = dateMap.get(lec);
-      if (!iso) return true; // keep recurring classes without explicit dates
+      // Rows without a usable Lecture Date can't be proven to belong to this
+      // week; keep them ONLY when the batch has no dated rows at all, otherwise
+      // they leak in from other weeks and show up as classes the sheet doesn't
+      // have today.
+      if (!iso) return isoDates.length === 0;
       return iso >= monIso && iso <= sunIso;
     });
 
@@ -643,7 +647,7 @@ app.use((req, _res, next) => {
 
     return lectures.filter((lec) => {
       const iso = dateMap.get(lec);
-      if (!iso) return true;
+      if (!iso) return isoDates.length === 0;
       return iso >= lMonIso && iso <= lSunIso;
     });
   }
@@ -660,11 +664,16 @@ app.use((req, _res, next) => {
 
     for (const lec of lectures) {
       const cleanBatch = extractCoreBatchCode(lec.batchCode || lec.batchFaculty || "");
+      // Prefer the exact Lecture Date; fall back to the day name only when the
+      // row carries no date at all.
+      const cleanDate = (lec.lectureDate || "").toString().trim().toUpperCase();
       const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
       const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
-      
-      // Each batch can only have ONE lecture in a specific day and time slot!
-      const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}`;
+      const cleanSubject = (lec.subject || "").trim().toUpperCase();
+      const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
+      // Same slot with a DIFFERENT subject/faculty is a real second lecture in
+      // the sheet, so it must survive; only true duplicate rows collapse.
+      const slotKey = `${cleanBatch}_${cleanDate || cleanDay}_${cleanTime}_${cleanSubject}_${cleanFaculty}`;
 
       if (!seen.has(slotKey)) {
         seen.set(slotKey, lec);
