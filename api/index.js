@@ -779,9 +779,49 @@ app.post("/api/update-batch-links", async (req, res) => {
 var extraClassCache = /* @__PURE__ */ new Map();
 var EXTRA_CLASS_SPREADSHEET_ID = "1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4";
 var EXTRA_CLASS_CACHE_TTL = 5 * 60 * 1e3;
-var cachedCenterSheets = null;
-var cachedCenterSheetsTimestamp = 0;
-var CENTER_SHEETS_CACHE_TTL = 60 * 60 * 1e3;
+var EXTRA_CLASS_CENTERS = [
+  { rawSheetTitle: "Hadapsar ", centerName: "Hadapsar", gid: "498958040" },
+  { rawSheetTitle: "Viman Nagar", centerName: "Viman Nagar", gid: "917736581" },
+  { rawSheetTitle: "Kothrud ", centerName: "Kothrud", gid: "2015026809" },
+  { rawSheetTitle: "PCMC ", centerName: "PCMC", gid: "15540423" },
+  { rawSheetTitle: "FC Road ", centerName: "FC Road", gid: "398485996" },
+  { rawSheetTitle: "Osmanabad (Dharashiv - S-SIP)", centerName: "Osmanabad (Dharashiv - S-SIP)", gid: "1691470459" },
+  { rawSheetTitle: "Pimple Saudagar", centerName: "Pimple Saudagar", gid: "4891040" }
+];
+function parseCsvRows(csvText) {
+  const rows = [];
+  let currentRow = [];
+  let currentCell = "";
+  let insideQuotes = false;
+  for (let i = 0; i < csvText.length; i++) {
+    const char = csvText[i];
+    const nextChar = csvText[i + 1];
+    if (char === '"') {
+      if (insideQuotes && nextChar === '"') {
+        currentCell += '"';
+        i++;
+      } else {
+        insideQuotes = !insideQuotes;
+      }
+    } else if (char === "," && !insideQuotes) {
+      currentRow.push(currentCell.trim());
+      currentCell = "";
+    } else if ((char === "\r" || char === "\n") && !insideQuotes) {
+      if (char === "\r" && nextChar === "\n") i++;
+      currentRow.push(currentCell.trim());
+      if (currentRow.some((c) => c !== "")) rows.push(currentRow);
+      currentRow = [];
+      currentCell = "";
+    } else {
+      currentCell += char;
+    }
+  }
+  if (currentCell || currentRow.length > 0) {
+    currentRow.push(currentCell.trim());
+    if (currentRow.some((c) => c !== "")) rows.push(currentRow);
+  }
+  return rows;
+}
 function parseDateToIso(rawDate, currentYearStr) {
   if (!rawDate) return null;
   const str = String(rawDate).trim();
@@ -849,7 +889,7 @@ function parseDateToIso(rawDate, currentYearStr) {
   }
   return null;
 }
-async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
+async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
   const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
   const cached = extraClassCache.get(cacheKey);
   if (!forceRefresh && cached && Date.now() - cached.timestamp < EXTRA_CLASS_CACHE_TTL) {
@@ -864,77 +904,57 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
     "Osmanabad (Dharashiv - S-SIP)",
     "Pimple Saudagar"
   ];
-  function matchAllowedCenter(title) {
-    const t = (title || "").trim().toLowerCase();
-    if (t.includes("hadapsar")) return "Hadapsar";
-    if (t.includes("viman")) return "Viman Nagar";
-    if (t.includes("kothrud")) return "Kothrud";
-    if (t.includes("pcmc")) return "PCMC";
-    if (t.includes("fc road") || t.includes("fcroad")) return "FC Road";
-    if (t.includes("osmanabad") || t.includes("dharashiv")) return "Osmanabad (Dharashiv - S-SIP)";
-    if (t.includes("pimple") || t.includes("saudagar")) return "Pimple Saudagar";
-    return null;
-  }
-  let centerSheets = cachedCenterSheets;
-  const isCenterSheetsValid = centerSheets && centerSheets.length > 0 && Date.now() - cachedCenterSheetsTimestamp < CENTER_SHEETS_CACHE_TTL;
-  if (!isCenterSheetsValid) {
-    try {
-      const metaRes = await sheets.spreadsheets.get({
-        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID
-      });
-      const allSheets = metaRes.data.sheets || [];
-      centerSheets = allSheets.map((s) => {
-        const rawTitle = (s.properties?.title || "").trim();
-        const centerName = matchAllowedCenter(rawTitle);
-        return {
-          rawSheetTitle: rawTitle,
-          centerName
-        };
-      }).filter((item) => item.centerName !== null);
-      if (centerSheets && centerSheets.length > 0) {
-        cachedCenterSheets = centerSheets;
-        cachedCenterSheetsTimestamp = Date.now();
+  let sheetResults = [];
+  let fetchSuccess = false;
+  try {
+    const csvPromises = EXTRA_CLASS_CENTERS.map(async (c) => {
+      const exportUrl = `https://docs.google.com/spreadsheets/d/${EXTRA_CLASS_SPREADSHEET_ID}/export?format=csv&gid=${c.gid}`;
+      const resp = await fetch(exportUrl);
+      if (!resp.ok) {
+        throw new Error(`Failed to fetch CSV for ${c.centerName}: HTTP ${resp.status}`);
       }
-    } catch (metaErr) {
-      console.warn("[Extra Class] Metadata fetch warning:", metaErr.message);
+      const text = await resp.text();
+      const rows = parseCsvRows(text);
+      return {
+        sheetTitle: c.rawSheetTitle,
+        centerName: c.centerName,
+        rows
+      };
+    });
+    sheetResults = await Promise.all(csvPromises);
+    fetchSuccess = sheetResults.some((s) => s.rows && s.rows.length > 0);
+  } catch (csvErr) {
+    console.warn("[Extra Class] Direct CSV export failed, falling back to Google Sheets API:", csvErr.message);
+  }
+  if (!fetchSuccess && sheets) {
+    try {
+      const ranges = EXTRA_CLASS_CENTERS.map((s) => `'${s.rawSheetTitle}'!A1:P`);
+      const batchRes = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+        ranges
+      });
+      const valueRanges = batchRes.data?.valueRanges || [];
+      sheetResults = EXTRA_CLASS_CENTERS.map((s, idx) => ({
+        sheetTitle: s.rawSheetTitle,
+        centerName: s.centerName,
+        rows: valueRanges[idx]?.values || []
+      }));
+      fetchSuccess = true;
+    } catch (batchErr) {
+      console.warn("[Extra Class] batchGet error:", batchErr.message);
       if (cached && cached.data) {
-        console.log("[Extra Class] Serving cached data due to metadata fetch error / quota.");
+        console.log("[Extra Class] Serving stale cached data due to API limit.");
         return cached.data;
       }
-      if (!centerSheets || centerSheets.length === 0) {
-        centerSheets = [
-          { rawSheetTitle: "Hadapsar", centerName: "Hadapsar" },
-          { rawSheetTitle: "Viman Nagar", centerName: "Viman Nagar" },
-          { rawSheetTitle: "Kothrud", centerName: "Kothrud" },
-          { rawSheetTitle: "PCMC", centerName: "PCMC" },
-          { rawSheetTitle: "FC Road", centerName: "FC Road" },
-          { rawSheetTitle: "Osmanabad", centerName: "Osmanabad (Dharashiv - S-SIP)" },
-          { rawSheetTitle: "Pimple Saudagar", centerName: "Pimple Saudagar" }
-        ];
-      }
     }
   }
-  const ranges = (centerSheets || []).map((s) => `'${s.rawSheetTitle}'!A1:P`);
-  let valueRanges = [];
-  try {
-    const batchRes = await sheets.spreadsheets.values.batchGet({
-      spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-      ranges
-    });
-    valueRanges = batchRes.data?.valueRanges || [];
-  } catch (batchErr) {
-    console.warn("[Extra Class] batchGet error:", batchErr.message);
+  if (!fetchSuccess) {
     if (cached && cached.data) {
-      console.log("[Extra Class] Serving stale cached data due to rate limit / quota exceeded.");
+      console.log("[Extra Class] Serving cached data.");
       return cached.data;
     }
-    throw batchErr;
+    throw new Error("Could not load extra class schedule.");
   }
-  const sheetResults = (centerSheets || []).map((s, idx) => ({
-    sheetTitle: s.rawSheetTitle,
-    centerName: s.centerName,
-    rows: valueRanges[idx]?.values || []
-  }));
   const now = /* @__PURE__ */ new Date();
   const todayIstParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
@@ -1529,8 +1549,12 @@ app.get("/api/custom-modules/data", async (req, res) => {
 app.get("/api/extra-classes/schedule", async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === "true";
-    const auth = getGoogleAuth(req);
-    const sheets = google.sheets({ version: "v4", auth });
+    let sheets = null;
+    try {
+      const auth = getGoogleAuth(req);
+      sheets = google.sheets({ version: "v4", auth });
+    } catch {
+    }
     const payload = await fetchAllExtraClassLectures(sheets, forceRefresh);
     res.json(payload);
   } catch (err) {

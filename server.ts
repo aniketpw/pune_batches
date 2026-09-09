@@ -1020,9 +1020,50 @@ app.use((req, _res, next) => {
   const EXTRA_CLASS_SPREADSHEET_ID = '1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4';
   const EXTRA_CLASS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
 
-  let cachedCenterSheets: { rawSheetTitle: string; centerName: string }[] | null = null;
-  let cachedCenterSheetsTimestamp = 0;
-  const CENTER_SHEETS_CACHE_TTL = 60 * 60 * 1000; // 1 hour TTL for tab metadata
+  const EXTRA_CLASS_CENTERS = [
+    { rawSheetTitle: 'Hadapsar ', centerName: 'Hadapsar', gid: '498958040' },
+    { rawSheetTitle: 'Viman Nagar', centerName: 'Viman Nagar', gid: '917736581' },
+    { rawSheetTitle: 'Kothrud ', centerName: 'Kothrud', gid: '2015026809' },
+    { rawSheetTitle: 'PCMC ', centerName: 'PCMC', gid: '15540423' },
+    { rawSheetTitle: 'FC Road ', centerName: 'FC Road', gid: '398485996' },
+    { rawSheetTitle: 'Osmanabad (Dharashiv - S-SIP)', centerName: 'Osmanabad (Dharashiv - S-SIP)', gid: '1691470459' },
+    { rawSheetTitle: 'Pimple Saudagar', centerName: 'Pimple Saudagar', gid: '4891040' },
+  ];
+
+  function parseCsvRows(csvText: string): string[][] {
+    const rows: string[][] = [];
+    let currentRow: string[] = [];
+    let currentCell = '';
+    let insideQuotes = false;
+    for (let i = 0; i < csvText.length; i++) {
+      const char = csvText[i];
+      const nextChar = csvText[i + 1];
+      if (char === '"') {
+        if (insideQuotes && nextChar === '"') {
+          currentCell += '"';
+          i++;
+        } else {
+          insideQuotes = !insideQuotes;
+        }
+      } else if (char === ',' && !insideQuotes) {
+        currentRow.push(currentCell.trim());
+        currentCell = '';
+      } else if ((char === '\r' || char === '\n') && !insideQuotes) {
+        if (char === '\r' && nextChar === '\n') i++;
+        currentRow.push(currentCell.trim());
+        if (currentRow.some((c) => c !== '')) rows.push(currentRow);
+        currentRow = [];
+        currentCell = '';
+      } else {
+        currentCell += char;
+      }
+    }
+    if (currentCell || currentRow.length > 0) {
+      currentRow.push(currentCell.trim());
+      if (currentRow.some((c) => c !== '')) rows.push(currentRow);
+    }
+    return rows;
+  }
 
   function parseDateToIso(rawDate: string, currentYearStr: string): string | null {
     if (!rawDate) return null;
@@ -1091,7 +1132,7 @@ app.use((req, _res, next) => {
     return null;
   }
 
-  async function fetchAllExtraClassLectures(sheets: any, forceRefresh = false): Promise<any> {
+  async function fetchAllExtraClassLectures(sheets: any = null, forceRefresh = false): Promise<any> {
     const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
     const cached = extraClassCache.get(cacheKey);
 
@@ -1099,8 +1140,6 @@ app.use((req, _res, next) => {
       return cached.data;
     }
 
-    // Allowed 7 Centers as specified by user:
-    // Hadapsar, Viman Nagar, Kothrud, PCMC, FC Road, Osmanabad (Dharashiv - S-SIP), Pimple Saudagar
     const ALLOWED_EXTRA_CLASS_CENTERS = [
       'Hadapsar',
       'Viman Nagar',
@@ -1111,87 +1150,63 @@ app.use((req, _res, next) => {
       'Pimple Saudagar',
     ];
 
-    function matchAllowedCenter(title: string): string | null {
-      const t = (title || '').trim().toLowerCase();
-      if (t.includes('hadapsar')) return 'Hadapsar';
-      if (t.includes('viman')) return 'Viman Nagar';
-      if (t.includes('kothrud')) return 'Kothrud';
-      if (t.includes('pcmc')) return 'PCMC';
-      if (t.includes('fc road') || t.includes('fcroad')) return 'FC Road';
-      if (t.includes('osmanabad') || t.includes('dharashiv')) return 'Osmanabad (Dharashiv - S-SIP)';
-      if (t.includes('pimple') || t.includes('saudagar')) return 'Pimple Saudagar';
-      return null;
+    let sheetResults: { sheetTitle: string; centerName: string; rows: any[][] }[] = [];
+    let fetchSuccess = false;
+
+    // 1. PRIMARY ENGINE: Direct Google Docs CSV Export (USES ZERO GOOGLE SHEETS API QUOTA!)
+    try {
+      const csvPromises = EXTRA_CLASS_CENTERS.map(async (c) => {
+        const exportUrl = `https://docs.google.com/spreadsheets/d/${EXTRA_CLASS_SPREADSHEET_ID}/export?format=csv&gid=${c.gid}`;
+        const resp = await fetch(exportUrl);
+        if (!resp.ok) {
+          throw new Error(`Failed to fetch CSV for ${c.centerName}: HTTP ${resp.status}`);
+        }
+        const text = await resp.text();
+        const rows = parseCsvRows(text);
+        return {
+          sheetTitle: c.rawSheetTitle,
+          centerName: c.centerName,
+          rows,
+        };
+      });
+
+      sheetResults = await Promise.all(csvPromises);
+      fetchSuccess = sheetResults.some((s) => s.rows && s.rows.length > 0);
+    } catch (csvErr: any) {
+      console.warn('[Extra Class] Direct CSV export failed, falling back to Google Sheets API:', csvErr.message);
     }
 
-    // 1. Resolve sheet tabs for the 7 centers (use cached tabs if within 1 hour)
-    let centerSheets = cachedCenterSheets;
-    const isCenterSheetsValid = centerSheets && centerSheets.length > 0 && (Date.now() - cachedCenterSheetsTimestamp < CENTER_SHEETS_CACHE_TTL);
-
-    if (!isCenterSheetsValid) {
+    // 2. FALLBACK ENGINE: Google Sheets API batchGet (if CSV fails)
+    if (!fetchSuccess && sheets) {
       try {
-        const metaRes = await sheets.spreadsheets.get({
+        const ranges = EXTRA_CLASS_CENTERS.map((s) => `'${s.rawSheetTitle}'!A1:P`);
+        const batchRes = await sheets.spreadsheets.values.batchGet({
           spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+          ranges,
         });
-        const allSheets = metaRes.data.sheets || [];
-        centerSheets = allSheets
-          .map((s: any) => {
-            const rawTitle = (s.properties?.title || '').trim();
-            const centerName = matchAllowedCenter(rawTitle);
-            return {
-              rawSheetTitle: rawTitle,
-              centerName,
-            };
-          })
-          .filter((item: any) => item.centerName !== null);
-
-        if (centerSheets && centerSheets.length > 0) {
-          cachedCenterSheets = centerSheets;
-          cachedCenterSheetsTimestamp = Date.now();
-        }
-      } catch (metaErr: any) {
-        console.warn('[Extra Class] Metadata fetch warning:', metaErr.message);
+        const valueRanges = batchRes.data?.valueRanges || [];
+        sheetResults = EXTRA_CLASS_CENTERS.map((s, idx) => ({
+          sheetTitle: s.rawSheetTitle,
+          centerName: s.centerName,
+          rows: valueRanges[idx]?.values || [],
+        }));
+        fetchSuccess = true;
+      } catch (batchErr: any) {
+        console.warn('[Extra Class] batchGet error:', batchErr.message);
         if (cached && cached.data) {
-          console.log('[Extra Class] Serving cached data due to metadata fetch error / quota.');
+          console.log('[Extra Class] Serving stale cached data due to API limit.');
           return cached.data;
         }
-        if (!centerSheets || centerSheets.length === 0) {
-          centerSheets = [
-            { rawSheetTitle: 'Hadapsar', centerName: 'Hadapsar' },
-            { rawSheetTitle: 'Viman Nagar', centerName: 'Viman Nagar' },
-            { rawSheetTitle: 'Kothrud', centerName: 'Kothrud' },
-            { rawSheetTitle: 'PCMC', centerName: 'PCMC' },
-            { rawSheetTitle: 'FC Road', centerName: 'FC Road' },
-            { rawSheetTitle: 'Osmanabad', centerName: 'Osmanabad (Dharashiv - S-SIP)' },
-            { rawSheetTitle: 'Pimple Saudagar', centerName: 'Pimple Saudagar' },
-          ];
-        }
       }
     }
 
-    // 2. Fetch rows from the 7 center sheets in ONE SINGLE batchGet call!
-    const ranges = (centerSheets || []).map((s: any) => `'${s.rawSheetTitle}'!A1:P`);
-    let valueRanges: any[] = [];
-    try {
-      const batchRes = await sheets.spreadsheets.values.batchGet({
-        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-        ranges,
-      });
-      valueRanges = batchRes.data?.valueRanges || [];
-    } catch (batchErr: any) {
-      console.warn('[Extra Class] batchGet error:', batchErr.message);
-      // If we hit Google Sheets API quota limit (429 / RESOURCE_EXHAUSTED) and have cached data:
+    if (!fetchSuccess) {
       if (cached && cached.data) {
-        console.log('[Extra Class] Serving stale cached data due to rate limit / quota exceeded.');
+        console.log('[Extra Class] Serving cached data.');
         return cached.data;
       }
-      throw batchErr;
+      throw new Error('Could not load extra class schedule.');
     }
-
-    const sheetResults = (centerSheets || []).map((s: any, idx: number) => ({
-      sheetTitle: s.rawSheetTitle,
-      centerName: s.centerName,
-      rows: valueRanges[idx]?.values || [],
-    }));
 
     // 3. Compute IST reference dates
     const now = new Date();
@@ -1909,8 +1924,13 @@ app.use((req, _res, next) => {
   app.get("/api/extra-classes/schedule", async (req, res) => {
     try {
       const forceRefresh = req.query.refresh === 'true';
-      const auth = getGoogleAuth(req);
-      const sheets = google.sheets({ version: "v4", auth });
+      let sheets: any = null;
+      try {
+        const auth = getGoogleAuth(req);
+        sheets = google.sheets({ version: "v4", auth });
+      } catch {
+        // Viewing uses direct Google Docs CSV export (0 API quota), auth is optional
+      }
       const payload = await fetchAllExtraClassLectures(sheets, forceRefresh);
       res.json(payload);
     } catch (err: any) {
