@@ -51,6 +51,10 @@ export interface LectureSchedule {
   facultyCode: string;     // e.g. "PPM"
   subject: string;         // Column AI (e.g. "Physics", "Chemistry")
   teacherEmail: string;    // Column AK (e.g. "ppm.faculty@pw.live")
+  teacherName?: string;
+  room?: string;
+  isExtraClass?: boolean;
+  announcement?: string;
   isToday: boolean;
   status: 'upcoming' | 'ongoing' | 'completed';
 }

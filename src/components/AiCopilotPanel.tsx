@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { motion, useDragControls } from 'motion/react';
 import { 
   Sparkles,
   X, 
@@ -62,7 +63,9 @@ export default function AiCopilotPanel({
   const [copiedSchedule, setCopiedSchedule] = useState<boolean>(false);
   const [copiedEmailId, setCopiedEmailId] = useState<string | null>(null);
   const contentScrollRef = useRef<HTMLDivElement>(null);
+  const aiSectionRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef<number>(0);
+  const dragControls = useDragControls();
 
   // Synchronize internal activeBatch with incoming batch prop
   useEffect(() => {
@@ -194,8 +197,12 @@ export default function AiCopilotPanel({
 
       // 2. Fetch AI explanation with schedule context
       try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000); // 6 sec client timeout
+
         const explainRes = await fetch('/api/ai/explain', {
           method: 'POST',
+          signal: controller.signal,
           headers: { 
             'Content-Type': 'application/json',
             ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
@@ -211,6 +218,7 @@ export default function AiCopilotPanel({
             allLectures: fetchedSchedule?.allLectures || [],
           }),
         });
+        clearTimeout(timeoutId);
 
         if (!explainRes.ok) throw new Error('AI Server is currently busy.');
         const data = await explainRes.json();
@@ -219,13 +227,18 @@ export default function AiCopilotPanel({
         }
       } catch (err: any) {
         if (isMounted) {
+          const scheduleSummary = fetchedSchedule && fetchedSchedule.allLectures.length > 0
+            ? `\n\n#### 📅 Timetable Overview:\n` +
+              (fetchedSchedule.todayLectures.length > 0
+                ? `* **Today's Classes:** ${fetchedSchedule.todayLectures.map(l => `${l.timeRange || l.startTime}: ${l.subject || 'Lecture'} (${l.facultyCode || 'Faculty'}${l.room ? ` - ${l.room}` : ''})`).join(', ')}`
+                : `* **Today:** No classes scheduled.\n* **This Week:** ${fetchedSchedule.allLectures.length} class(es) scheduled on ${fetchedSchedule.daysAvailable?.join(', ') || 'other days'}.`)
+            : `\n\n*(No live lecture rows found in timetable or extra class sheets for this batch.)*`;
+
           setExplanation(`### 📋 Batch Details: **${activeBatch.displayName || activeBatch.fullName}**
-* **Center:** ${activeBatch.tabName}
+* **Center:** ${activeBatch.tabName || 'Pune Center'}
 * **Category:** ${activeBatch.category} | **Phase:** ${activeBatch.phase}
 * **Shift:** ${activeBatch.timeSlot || 'Standard'}
-* **Assigned BM:** ${activeBatch.bmEmail || 'None'}
-
-*(Could not connect to Gemini AI. Check API Key in Settings.)*`);
+* **Assigned BM:** ${activeBatch.bmEmail || 'None'}${scheduleSummary}`);
         }
       } finally {
         if (isMounted) setIsLoading(false);
@@ -419,7 +432,7 @@ export default function AiCopilotPanel({
   const getStatusBadge = (status: 'upcoming' | 'ongoing' | 'completed') => {
     if (status === 'ongoing') {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[1px] bg-emerald-50 text-emerald-700 border border-emerald-300 text-[8px] font-black uppercase tracking-wider animate-pulse">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[2px] bg-emerald-100 text-emerald-800 border border-emerald-300 text-[9px] font-black uppercase tracking-wider animate-pulse">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
           Live Now
         </span>
@@ -427,19 +440,33 @@ export default function AiCopilotPanel({
     }
     if (status === 'completed') {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[1px] bg-slate-100 text-slate-500 border border-slate-200 text-[8px] font-black uppercase tracking-wider">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[2px] bg-slate-100 text-slate-600 border border-slate-200 text-[9px] font-black uppercase tracking-wider">
           Completed
         </span>
       );
     }
     return (
-      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[1px] bg-sky-50 text-sky-700 border border-sky-200 text-[8px] font-black uppercase tracking-wider">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[2px] bg-sky-50 text-sky-700 border border-sky-200 text-[9px] font-black uppercase tracking-wider">
         Upcoming
       </span>
     );
   };
 
   const availableDays = ['TODAY', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'ALL'];
+
+  const getLectureDay = React.useCallback((lec: LectureSchedule): string => {
+    const d = (lec.day || '').trim();
+    if (d.length >= 3) return d.substring(0, 3).toUpperCase();
+    if (lec.lectureDate) {
+      try {
+        const parsed = new Date(lec.lectureDate);
+        if (!isNaN(parsed.getTime())) {
+          return parsed.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+        }
+      } catch {}
+    }
+    return '';
+  }, []);
 
   const dayCounts = React.useMemo(() => {
     if (!scheduleData) return {} as Record<string, number>;
@@ -448,7 +475,7 @@ export default function AiCopilotPanel({
       ALL: scheduleData.allLectures?.length || 0,
     };
     (scheduleData.allLectures || []).forEach((l) => {
-      const d3 = (l.day || '').trim().substring(0, 3).toLowerCase();
+      const d3 = getLectureDay(l).toLowerCase();
       availableDays.forEach((ad) => {
         if (ad !== 'TODAY' && ad !== 'ALL' && ad.toLowerCase().startsWith(d3)) {
           counts[ad] = (counts[ad] || 0) + 1;
@@ -456,7 +483,7 @@ export default function AiCopilotPanel({
       });
     });
     return counts;
-  }, [scheduleData]);
+  }, [scheduleData, getLectureDay]);
 
   const groupedLecturesByDay = React.useMemo(() => {
     if (!scheduleData?.allLectures) return [];
@@ -471,8 +498,7 @@ export default function AiCopilotPanel({
 
     const mapByDay = new Map<string, LectureSchedule[]>();
     for (const lec of scheduleData.allLectures) {
-      const rawDay = (lec.day || '').trim();
-      const day3 = rawDay.substring(0, 3).toUpperCase();
+      const day3 = getLectureDay(lec) || 'OTHER';
       const existing = mapByDay.get(day3) || [];
       existing.push(lec);
       mapByDay.set(day3, existing);
@@ -522,29 +548,45 @@ export default function AiCopilotPanel({
     return groups;
   }, [scheduleData]);
 
+  const parseInlineBold = (text: string) => {
+    const parts = text.split(/\*\*([^*]+)\*\*/g);
+    return parts.map((part, i) => (i % 2 === 1 ? <strong key={i} className="font-bold text-slate-800">{part}</strong> : part));
+  };
+
   const renderLectureCard = (lec: LectureSchedule, uniqueKey: string, showDayBadge: boolean = false) => {
+    const cleanTime = (lec.timeRange || `${lec.startTime || ''} - ${lec.endTime || ''}`)
+      .replace(/\s*-\/-\s*/g, ' – ')
+      .replace(/\s*\/\s*/g, ' – ')
+      .replace(/\s*-\s*/g, ' – ')
+      .trim();
+
     return (
       <div
         key={uniqueKey}
-        className="p-2.5 bg-[#FAF9F5] rounded-[2px] border border-[#E2E1DA] hover:border-slate-400 transition-all space-y-1.5"
+        className="p-3 sm:p-3.5 bg-white rounded-[3px] border border-slate-200 hover:border-slate-400 transition-all shadow-xs space-y-2"
       >
         {/* Top Row: Time & Subject & Status */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-[10px] font-black text-slate-900 flex items-center gap-1">
-              <Clock className="w-3 h-3 text-slate-500" />
-              {lec.timeRange || `${lec.startTime} - ${lec.endTime}`}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xs sm:text-sm font-black text-slate-950 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-indigo-600 flex-shrink-0" />
+              {cleanTime}
             </span>
             {showDayBadge && lec.day && (
-              <span className="px-1 py-0.2 bg-slate-200 text-slate-700 rounded-[1px] text-[8px] font-black uppercase">
+              <span className="px-1.5 py-0.5 bg-slate-200 text-slate-800 rounded-[2px] text-[9px] font-black uppercase">
                 {lec.day}
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            {lec.isExtraClass && (
+              <span className="px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-300">
+                Extra Class
+              </span>
+            )}
             {lec.subject && (
-              <span className={`px-1.5 py-0.5 rounded-[1px] text-[8px] font-black uppercase tracking-wider border ${getSubjectBadgeStyle(lec.subject)}`}>
+              <span className={`px-2 py-0.5 rounded-[2px] text-[9.5px] sm:text-[10px] font-black uppercase tracking-wider border ${getSubjectBadgeStyle(lec.subject)}`}>
                 {lec.subject}
               </span>
             )}
@@ -552,36 +594,43 @@ export default function AiCopilotPanel({
           </div>
         </div>
 
-        {/* Bottom Row: Faculty & Teacher Email */}
-        <div className="flex items-center justify-between text-[9px] pt-1 border-t border-slate-200/60 text-slate-600">
-          <div className="flex items-center gap-1 font-bold">
-            <span className="text-slate-400 uppercase text-[8px]">Faculty:</span>
-            <span className="text-slate-900 uppercase font-black">{lec.facultyCode || 'TBD'}</span>
+        {/* Bottom Row: Faculty, Room & Teacher Email */}
+        <div className="flex items-center justify-between text-xs pt-1.5 border-t border-slate-100 text-slate-600 gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 font-bold min-w-0">
+            <span className="text-slate-400 uppercase text-[9px] flex-shrink-0">Faculty:</span>
+            <span className="text-slate-900 font-black text-xs sm:text-[13px] truncate max-w-[150px]">
+              {lec.teacherName ? `${lec.teacherName} (${lec.facultyCode || 'TBD'})` : (lec.facultyCode || 'TBD')}
+            </span>
+            {lec.room && (
+              <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 text-slate-700 rounded-[2px] text-[8px] font-bold uppercase flex-shrink-0">
+                {lec.room}
+              </span>
+            )}
           </div>
 
           {lec.teacherEmail ? (
-            <div className="flex items-center gap-1 font-mono">
+            <div className="flex items-center gap-1 font-mono text-[10.5px] sm:text-xs flex-shrink-0">
               <a
                 href={`mailto:${lec.teacherEmail}`}
-                className="text-indigo-600 hover:underline truncate max-w-[150px]"
+                className="text-indigo-600 hover:underline font-medium truncate max-w-[150px] sm:max-w-[190px]"
                 title={`Email: ${lec.teacherEmail}`}
               >
                 {lec.teacherEmail}
               </a>
               <button
                 onClick={() => handleCopyEmail(lec.teacherEmail, uniqueKey)}
-                className="p-0.5 text-slate-400 hover:text-slate-900 cursor-pointer"
+                className="p-1 text-slate-400 hover:text-slate-900 cursor-pointer rounded-[2px] hover:bg-slate-100"
                 title="Copy email"
               >
                 {copiedEmailId === uniqueKey ? (
-                  <span className="text-[7px] text-emerald-600 font-bold">✓</span>
+                  <span className="text-[9px] text-emerald-600 font-bold">✓</span>
                 ) : (
-                  <Copy className="w-2.5 h-2.5" />
+                  <Copy className="w-3 h-3" />
                 )}
               </button>
             </div>
           ) : (
-            <span className="text-[8px] text-slate-400 font-bold uppercase">Email not listed</span>
+            <span className="text-[9px] text-slate-400 font-bold uppercase flex-shrink-0">Email not listed</span>
           )}
         </div>
       </div>
@@ -623,72 +672,50 @@ export default function AiCopilotPanel({
     });
   };
 
-  // Swipe to close handlers for mobile bottom sheet
-  const [swipeDownOffset, setSwipeDownOffset] = useState<number>(0);
-  const touchStartYRef = useRef<number>(0);
-  const isDraggingSheet = useRef<boolean>(false);
-
-  const handleSheetTouchStart = (e: React.TouchEvent) => {
-    touchStartYRef.current = e.touches[0].clientY;
-    isDraggingSheet.current = true;
-  };
-
-  const handleSheetTouchMove = (e: React.TouchEvent) => {
-    if (!isDraggingSheet.current) return;
-    const currentY = e.touches[0].clientY;
-    const deltaY = currentY - touchStartYRef.current;
-    if (deltaY > 0) {
-      setSwipeDownOffset(deltaY);
-    } else {
-      setSwipeDownOffset(0);
-    }
-  };
-
-  const handleSheetTouchEnd = () => {
-    if (!isDraggingSheet.current) return;
-    isDraggingSheet.current = false;
-    if (swipeDownOffset > 70) {
-      onClose();
-    }
-    setSwipeDownOffset(0);
-  };
-
-  const parseInlineBold = (text: string) => {
-    const parts = text.split(/\*\*([^*]+)\*\*/g);
-    return parts.map((part, i) => (i % 2 === 1 ? <strong key={i} className="font-bold text-slate-800">{part}</strong> : part));
-  };
-
   return (
-    <div 
-      className="bg-white rounded-t-2xl sm:rounded-[2px] border border-[#E2E1DA] flex flex-col h-full w-full lg:w-[420px] xl:w-[460px] flex-shrink-0 overflow-hidden shadow-2xl lg:shadow-sm overscroll-contain will-change-transform" 
-      id="ai-copilot-panel"
-      style={{
-        transform: swipeDownOffset > 0 ? `translateY(${swipeDownOffset}px)` : undefined,
-        transition: swipeDownOffset === 0 ? 'transform 0.22s cubic-bezier(0.16, 1, 0.3, 1)' : 'none'
+    <motion.div 
+      drag="y"
+      dragListener={false}
+      dragControls={dragControls}
+      dragConstraints={{ top: 0 }}
+      dragElastic={{ top: 0, bottom: 0.7 }}
+      onDragEnd={(_, info) => {
+        if (info.offset.y > 60 || info.velocity.y > 250) {
+          onClose();
+        }
       }}
+      className="bg-white rounded-t-2xl sm:rounded-[2px] border border-[#E2E1DA] flex flex-col h-full w-full lg:w-[420px] xl:w-[460px] flex-shrink-0 overflow-hidden shadow-2xl lg:shadow-sm overscroll-contain" 
+      id="ai-copilot-panel"
     >
       {/* Mobile drag handle with interactive swipe-down-to-close */}
       <div 
-        className="w-full pt-2.5 pb-2 flex flex-col items-center justify-center cursor-grab active:cursor-grabbing touch-none select-none lg:hidden bg-slate-900 border-b border-slate-800 active:bg-slate-800 transition-colors"
-        onTouchStart={handleSheetTouchStart}
-        onTouchMove={handleSheetTouchMove}
-        onTouchEnd={handleSheetTouchEnd}
+        onPointerDown={(e) => {
+          if (window.innerWidth < 1024) {
+            dragControls.start(e);
+          }
+        }}
         onClick={onClose}
+        className="w-full pt-3 pb-2.5 flex flex-col items-center justify-center cursor-grab active:cursor-grabbing touch-none select-none lg:hidden bg-slate-900 border-b border-slate-800 active:bg-slate-800 transition-colors"
         title="Swipe down or tap to close"
       >
-        <div className="w-12 h-1.5 bg-slate-500 rounded-full transition-colors" />
-        <div className="flex items-center gap-1 text-[9px] text-slate-400 font-bold uppercase tracking-wider mt-1">
-          <ChevronDown className="w-3 h-3 text-slate-400 animate-pulse" />
-          <span>Swipe down to close</span>
+        <div className="w-14 h-1.5 bg-slate-400/80 rounded-full transition-colors" />
+        <div className="flex items-center gap-1 text-[9.5px] text-slate-300 font-bold uppercase tracking-wider mt-1">
+          <ChevronDown className="w-3.5 h-3.5 text-slate-300 animate-pulse" />
+          <span>Swipe down or tap to close</span>
         </div>
       </div>
 
       {/* Header */}
       <div 
+        onPointerDown={(e) => {
+          if (window.innerWidth < 1024) {
+            const target = e.target as HTMLElement;
+            if (!target.closest('button') && !target.closest('input')) {
+              dragControls.start(e);
+            }
+          }
+        }}
         className="bg-slate-900 text-white px-3.5 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between flex-shrink-0 touch-none select-none cursor-grab active:cursor-grabbing"
-        onTouchStart={handleSheetTouchStart}
-        onTouchMove={handleSheetTouchMove}
-        onTouchEnd={handleSheetTouchEnd}
       >
         <div className="flex items-center gap-2 min-w-0">
           <div className="p-1 bg-indigo-600 rounded-[2px] text-white flex-shrink-0">
@@ -868,9 +895,9 @@ export default function AiCopilotPanel({
             <div className="bg-white rounded-[2px] border border-[#E2E1DA] overflow-hidden shadow-xs">
               {/* Timetable Header */}
               <div className="bg-slate-50 border-b border-[#E2E1DA] px-3.5 py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <Calendar className="w-3.5 h-3.5 text-indigo-600 flex-shrink-0" />
-                  <span className="text-[10px] font-black text-slate-900 uppercase tracking-wider truncate">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Calendar className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                  <span className="text-[11px] sm:text-xs font-black text-slate-900 uppercase tracking-wider truncate">
                     {scheduleData 
                       ? (selectedDayFilter === 'TODAY' 
                           ? `Today • ${scheduleData.todayDay} (${scheduleData.todayDate})` 
@@ -880,7 +907,7 @@ export default function AiCopilotPanel({
                       : 'Batch Schedule'}
                   </span>
                   {scheduleData && (
-                    <span className={`px-1.5 py-0.5 rounded-[1px] text-[8px] font-black uppercase flex-shrink-0 ${
+                    <span className={`px-2 py-0.5 rounded-[2px] text-[8.5px] font-black uppercase flex-shrink-0 ${
                       selectedDayFilter === 'TODAY' && scheduleData.todayLectures.length > 0 
                         ? 'bg-emerald-100 text-emerald-800' 
                         : 'bg-slate-200 text-slate-700'
@@ -894,11 +921,11 @@ export default function AiCopilotPanel({
                   )}
                 </div>
 
-                <div className="flex items-center gap-1 flex-shrink-0">
+                <div className="flex items-center gap-1.5 flex-shrink-0">
                   <button
                     onClick={handleRefreshSchedule}
                     disabled={isScheduleLoading}
-                    className="p-1 bg-white hover:bg-slate-100 border border-[#E2E1DA] text-slate-600 hover:text-slate-900 rounded-[2px] text-[8px] font-bold flex items-center gap-1 cursor-pointer transition-all uppercase tracking-wider disabled:opacity-50"
+                    className="p-1.5 bg-white hover:bg-slate-100 border border-[#E2E1DA] text-slate-700 hover:text-slate-900 rounded-[2px] text-[8.5px] font-bold flex items-center gap-1 cursor-pointer transition-all uppercase tracking-wider disabled:opacity-50"
                     title="Force refresh timetable from Google Sheets Raw_DB"
                   >
                     <RotateCw className={`w-3 h-3 ${isScheduleLoading ? 'animate-spin text-indigo-600' : ''}`} />
@@ -906,26 +933,36 @@ export default function AiCopilotPanel({
                   </button>
                   <button
                     onClick={handleCopySchedule}
-                    className="p-1 bg-white hover:bg-slate-100 border border-[#E2E1DA] text-slate-600 hover:text-slate-900 rounded-[2px] text-[8px] font-bold flex items-center gap-1 cursor-pointer transition-all uppercase tracking-wider"
+                    className="p-1.5 bg-white hover:bg-slate-100 border border-[#E2E1DA] text-slate-700 hover:text-slate-900 rounded-[2px] text-[8.5px] font-bold flex items-center gap-1 cursor-pointer transition-all uppercase tracking-wider"
                     title="Copy timetable as WhatsApp text"
                   >
                     {copiedSchedule ? (
                       <>
                         <CheckCheck className="w-3 h-3 text-emerald-600" />
-                        <span className="text-emerald-600 text-[8px]">Copied!</span>
+                        <span className="text-emerald-600 text-[8.5px]">Copied!</span>
                       </>
                     ) : (
                       <>
                         <Copy className="w-3 h-3" />
-                        <span className="text-[8px]">Copy TT</span>
+                        <span className="text-[8.5px]">Copy TT</span>
                       </>
                     )}
+                  </button>
+                  <button
+                    onClick={() => {
+                      aiSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="p-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 rounded-[2px] text-[8.5px] font-black flex items-center gap-1 cursor-pointer transition-all uppercase tracking-wider"
+                    title="Jump to AI Academic Briefing & Chat"
+                  >
+                    <Bot className="w-3 h-3 text-indigo-600" />
+                    <span>AI Info ↓</span>
                   </button>
                 </div>
               </div>
 
               {/* Day filter selector tabs with live class counts */}
-              <div className="px-2.5 py-1.5 bg-[#FAF9F5] border-b border-[#E2E1DA] flex items-center gap-1 overflow-x-auto scrollbar-none">
+              <div className="px-2.5 py-2 bg-[#FAF9F5] border-b border-[#E2E1DA] flex items-center gap-1.5 overflow-x-auto scrollbar-none">
                 {availableDays.map((d) => {
                   const count = dayCounts[d] || 0;
                   const isSelected = selectedDayFilter === d;
@@ -933,15 +970,15 @@ export default function AiCopilotPanel({
                     <button
                       key={d}
                       onClick={() => setSelectedDayFilter(d)}
-                      className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-wider rounded-[2px] transition-all cursor-pointer whitespace-nowrap border flex items-center gap-1 ${
+                      className={`px-2.5 py-1 text-[9px] sm:text-[10px] font-black uppercase tracking-wider rounded-[2px] transition-all cursor-pointer whitespace-nowrap border flex items-center gap-1.5 ${
                         isSelected
-                          ? 'bg-slate-900 text-white border-slate-900'
-                          : 'bg-white hover:bg-slate-100 text-slate-600 border-[#E2E1DA]'
+                          ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                          : 'bg-white hover:bg-slate-100 text-slate-700 border-[#E2E1DA]'
                       }`}
                     >
                       <span>{d === 'TODAY' ? 'Today' : d === 'ALL' ? 'All (Week)' : d}</span>
                       {count > 0 && (
-                        <span className={`px-1 py-0.2 rounded-full text-[7px] font-bold ${
+                        <span className={`px-1.5 py-0.2 rounded-full text-[8px] font-bold ${
                           isSelected ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-700'
                         }`}>
                           {count}
@@ -976,28 +1013,44 @@ export default function AiCopilotPanel({
                       </div>
                     </div>
                   ) : (
-                    <div className="py-4 px-3 bg-amber-50/90 border border-amber-200/80 rounded-[2px] space-y-2 text-center">
-                      <div className="flex items-center justify-center gap-1.5 text-amber-900 font-black text-[10px] uppercase tracking-wider">
-                        <Calendar className="w-3.5 h-3.5 text-amber-700" />
-                        <span>No classes scheduled for Today ({scheduleData?.todayDay}, {scheduleData?.todayDate})</span>
-                      </div>
-                      {scheduleData && scheduleData.allLectures.length > 0 ? (
-                        <div className="pt-1.5 border-t border-amber-200/60 space-y-2">
-                          <p className="text-[8.5px] text-slate-600 font-medium">
-                            This batch has <strong>{scheduleData.allLectures.length} classes</strong> scheduled across other days this week.
-                          </p>
-                          <button
-                            onClick={() => setSelectedDayFilter('ALL')}
-                            className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white text-[8px] font-black uppercase tracking-wider rounded-[2px] cursor-pointer transition-all inline-flex items-center gap-1"
-                          >
-                            <Calendar className="w-3 h-3 text-indigo-400" />
-                            <span>View Full Weekly Schedule</span>
-                          </button>
+                    <div className="space-y-3">
+                      <div className="py-3.5 px-3 bg-amber-50/90 border border-amber-200/80 rounded-[2px] space-y-1.5 text-center">
+                        <div className="flex items-center justify-center gap-1.5 text-amber-900 font-black text-[10.5px] uppercase tracking-wider">
+                          <Calendar className="w-3.5 h-3.5 text-amber-700" />
+                          <span>No classes scheduled for Today ({scheduleData?.todayDay}, {scheduleData?.todayDate})</span>
                         </div>
-                      ) : (
-                        <p className="text-[8px] text-slate-400 uppercase font-bold">
-                          No lecture rows found for this batch in Raw_DB.
-                        </p>
+                        {scheduleData && scheduleData.allLectures.length > 0 ? (
+                          <div className="pt-1 border-t border-amber-200/60 flex items-center justify-between text-[9px] text-slate-700 font-medium px-1">
+                            <span>
+                              This batch has <strong>{scheduleData.allLectures.length} class{scheduleData.allLectures.length !== 1 ? 'es' : ''}</strong> scheduled on other days this week:
+                            </span>
+                            <button
+                              onClick={() => setSelectedDayFilter('ALL')}
+                              className="text-indigo-600 font-bold hover:underline cursor-pointer uppercase text-[8px] flex items-center gap-0.5"
+                            >
+                              Day-by-Day →
+                            </button>
+                          </div>
+                        ) : (
+                          <p className="text-[8.5px] text-slate-400 uppercase font-bold">
+                            No lecture rows found for this batch in Timetable Raw_DB or Extra Class sheets.
+                          </p>
+                        )}
+                      </div>
+
+                      {/* DIRECT PREVIEW OF SCHEDULED CLASSES THIS WEEK */}
+                      {scheduleData && scheduleData.allLectures.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between px-1 text-[9px] font-black uppercase tracking-wider text-slate-500">
+                            <span>Scheduled Classes for this Batch ({scheduleData.allLectures.length}):</span>
+                            <span className="text-[7.5px] text-slate-400 font-bold">ALL TIMETABLE & EXTRA LECTURES</span>
+                          </div>
+                          <div className="space-y-1.5">
+                            {scheduleData.allLectures.map((lec: LectureSchedule, idx: number) => 
+                              renderLectureCard(lec, `today-preview-${idx}`, true)
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
                   )
@@ -1040,7 +1093,7 @@ export default function AiCopilotPanel({
                         No weekly lectures found
                       </p>
                       <p className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">
-                        No matching lecture rows found in Raw_DB for this batch.
+                        No matching lecture rows found in Timetable Raw_DB or Extra Class sheets for this batch.
                       </p>
                     </div>
                   )
@@ -1048,7 +1101,7 @@ export default function AiCopilotPanel({
                   /* SPECIFIC DAY VIEW: e.g. Mon, Tue, Wed, Thu, Fri, Sat */
                   (() => {
                     const dayLecs = (scheduleData?.allLectures || []).filter((l) => 
-                      (l.day || '').trim().toUpperCase().startsWith(selectedDayFilter.substring(0, 3).toUpperCase())
+                      getLectureDay(l).startsWith(selectedDayFilter.substring(0, 3).toUpperCase())
                     );
                     const dayDate = dayLecs.find((l) => l.lectureDate)?.lectureDate || '';
                     const isToday = dayLecs.some((l) => l.isToday);
@@ -1108,116 +1161,138 @@ export default function AiCopilotPanel({
               )}
             </div>
 
-            {/* SECTION 2: GEMINI AI ACADEMIC DECODING & ANALYSIS */}
-            <div className="bg-white p-4 rounded-[2px] border border-[#E2E1DA] relative group">
-              <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#E2E1DA]">
-                <div className="flex items-center gap-1.5">
-                  <Bot className="w-3.5 h-3.5 text-indigo-600" />
-                  <h4 className="text-[10px] font-black uppercase tracking-wider text-slate-900">
-                    AI Academic Briefing
-                  </h4>
-                </div>
-                <button 
-                  onClick={handleCopyExplanation}
-                  className="p-1 bg-white hover:bg-slate-50 border border-[#E2E1DA] text-slate-500 rounded-[2px] transition-all cursor-pointer flex items-center gap-1"
-                  title="Copy analysis"
-                >
-                  {copied ? (
-                    <span className="text-[8px] text-emerald-600 font-black px-1 uppercase tracking-wider">Copied!</span>
-                  ) : (
-                    <>
-                      <Copy className="w-3 h-3" />
-                      <span className="text-[8px] font-bold uppercase tracking-wider">Copy</span>
-                    </>
-                  )}
-                </button>
+            {/* Scroll Down Prompt for AI Section */}
+            <div 
+              onClick={() => aiSectionRef.current?.scrollIntoView({ behavior: 'smooth' })}
+              className="py-2.5 flex items-center justify-center gap-2.5 text-slate-400 cursor-pointer select-none group"
+            >
+              <div className="h-px bg-slate-200 flex-1 group-hover:bg-slate-300 transition-colors" />
+              <div className="flex items-center gap-1.5 px-3.5 py-1.5 bg-white border border-slate-200 group-hover:border-indigo-300 rounded-full shadow-2xs text-[9.5px] sm:text-[10px] font-black uppercase tracking-wider text-slate-600 group-hover:text-indigo-600 transition-all">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Scroll down for AI Academic Briefing & Chat</span>
+                <ChevronDown className="w-3.5 h-3.5 text-indigo-500 animate-bounce" />
               </div>
-
-              {isLoading ? (
-                <div className="py-12 flex flex-col items-center justify-center gap-2">
-                  <Loader2 className="w-5 h-5 animate-spin text-slate-800" />
-                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wider animate-pulse">
-                    Synthesizing schedule & batch intelligence...
-                  </p>
-                </div>
-              ) : (
-                <div className="prose max-w-none space-y-1.5 text-xs text-slate-700">
-                  {renderMarkdown(explanation)}
-                </div>
-              )}
+              <div className="h-px bg-slate-200 flex-1 group-hover:bg-slate-300 transition-colors" />
             </div>
 
-            {/* SECTION 3: CONVERSATION HISTORY */}
-            {messages.length > 0 && (
-              <div className="space-y-3 pt-1">
-                <div className="text-[9px] font-black text-slate-400 uppercase tracking-wider text-center">
-                  Chat Context
+            {/* SECTION 2 & 3: GEMINI AI ACADEMIC DECODING, PROMPTS & CHAT */}
+            <div ref={aiSectionRef} className="space-y-4 pt-1">
+              {/* AI Academic Briefing Card */}
+              <div className="bg-white p-4 rounded-[2px] border border-[#E2E1DA] relative group shadow-xs">
+                <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#E2E1DA]">
+                  <div className="flex items-center gap-1.5">
+                    <Bot className="w-3.5 h-3.5 text-indigo-600" />
+                    <h4 className="text-[10px] font-black uppercase tracking-wider text-slate-900">
+                      AI Academic Briefing
+                    </h4>
+                  </div>
+                  <button 
+                    onClick={handleCopyExplanation}
+                    className="p-1 bg-white hover:bg-slate-50 border border-[#E2E1DA] text-slate-500 rounded-[2px] transition-all cursor-pointer flex items-center gap-1"
+                    title="Copy analysis"
+                  >
+                    {copied ? (
+                      <span className="text-[8px] text-emerald-600 font-black px-1 uppercase tracking-wider">Copied!</span>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span className="text-[8px] font-bold uppercase tracking-wider">Copy</span>
+                      </>
+                    )}
+                  </button>
                 </div>
-                {messages.map((msg, index) => (
-                  <div key={index} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[85%] rounded-[2px] px-3.5 py-2.5 text-xs border ${
-                      msg.role === 'user' 
-                        ? 'bg-slate-900 border-slate-900 text-white font-medium' 
-                        : 'bg-white border-[#E2E1DA] text-slate-800'
-                    }`}>
-                      <div className="flex items-center gap-1.5 mb-1 text-[8px] opacity-75 uppercase tracking-wide font-black">
-                        {msg.role === 'user' ? <User className="w-3 h-3" /> : <Bot className="w-3 h-3" />}
-                        <span>{msg.role === 'user' ? 'You' : 'Assistant'}</span>
+
+                {isLoading ? (
+                  <div className="py-12 flex flex-col items-center justify-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin text-slate-800" />
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wider animate-pulse">
+                      Synthesizing schedule & batch intelligence...
+                    </p>
+                  </div>
+                ) : (
+                  <div className="prose max-w-none space-y-1.5 text-xs text-slate-700">
+                    {renderMarkdown(explanation)}
+                  </div>
+                )}
+              </div>
+
+              {/* Recommended prompt bubbles */}
+              {batch && !isLoading && (
+                <div className="space-y-1.5">
+                  <div className="text-[9px] font-black uppercase tracking-wider text-slate-400 px-0.5">
+                    Quick AI Prompts:
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-1">
+                    {quickQuestions.map((q, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => triggerQuickQuestion(q)}
+                        className="px-2.5 py-1.5 bg-white hover:bg-indigo-50 text-[9px] font-bold text-slate-700 hover:text-indigo-600 border border-[#E2E1DA] hover:border-indigo-200 rounded-[2px] whitespace-nowrap transition-all cursor-pointer shadow-2xs"
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Conversation History */}
+              {messages.length > 0 && (
+                <div className="space-y-3 pt-1">
+                  <div className="text-[9px] font-black text-slate-400 uppercase tracking-wider text-center">
+                    Chat Context
+                  </div>
+                  {messages.map((msg, index) => (
+                    <div key={index} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[85%] rounded-[2px] px-3.5 py-2.5 text-xs border ${
+                        msg.role === 'user' 
+                          ? 'bg-slate-900 border-slate-900 text-white font-medium' 
+                          : 'bg-white border-[#E2E1DA] text-slate-800'
+                      }`}>
+                        <div className="flex items-center gap-1.5 mb-1 text-[8px] opacity-75 uppercase tracking-wide font-black">
+                          {msg.role === 'user' ? <User className="w-3 h-3" /> : <Bot className="w-3 h-3" />}
+                          <span>{msg.role === 'user' ? 'You' : 'Assistant'}</span>
+                        </div>
+                        <div className="whitespace-pre-line leading-relaxed text-[11px]">{msg.text}</div>
                       </div>
-                      <div className="whitespace-pre-line leading-relaxed text-[11px]">{msg.text}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {isSending && (
+                <div className="flex gap-2 justify-start">
+                  <div className="bg-white border border-[#E2E1DA] rounded-[2px] px-3 py-2">
+                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                      <Loader2 className="w-3 h-3 animate-spin text-slate-800" />
+                      <span>AI Copilot formulating reply...</span>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-
-            {isSending && (
-              <div className="flex gap-2 justify-start">
-                <div className="bg-white border border-[#E2E1DA] rounded-[2px] px-3 py-2">
-                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold uppercase tracking-wider">
-                    <Loader2 className="w-3 h-3 animate-spin text-slate-800" />
-                    <span>AI Copilot formulating reply...</span>
-                  </div>
                 </div>
-              </div>
-            )}
+              )}
+
+              {/* Chat Input Box */}
+              <form onSubmit={handleSendMessage} className="p-2.5 bg-white rounded-[2px] border border-[#E2E1DA] shadow-xs flex items-center gap-2">
+                <input
+                  type="text"
+                  value={inputQuery}
+                  onChange={(e) => setInputQuery(e.target.value)}
+                  placeholder={batch ? "Ask Gemini about schedule, faculty, or students..." : "Select batch to chat..."}
+                  disabled={!batch || isSending}
+                  className="flex-1 text-xs px-3 py-2 border border-[#E2E1DA] rounded-[2px] focus:outline-none focus:border-slate-800 disabled:bg-[#FAF9F5] disabled:text-slate-400 transition-all font-sans"
+                />
+                <button
+                  type="submit"
+                  disabled={!batch || !inputQuery.trim() || isSending}
+                  className="p-2 bg-slate-900 border border-slate-900 hover:bg-slate-800 disabled:bg-slate-100 text-white disabled:text-slate-300 rounded-[2px] transition-all cursor-pointer shadow-2xs"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                </button>
+              </form>
+            </div>
           </div>
         )}
       </div>
-
-      {/* Recommended prompt bubbles */}
-      {batch && !isLoading && (
-        <div className="px-3 py-2 bg-[#FAF9F5] border-t border-[#E2E1DA] flex gap-1.5 overflow-x-auto scrollbar-none flex-shrink-0">
-          {quickQuestions.map((q, idx) => (
-            <button
-              key={idx}
-              onClick={() => triggerQuickQuestion(q)}
-              className="px-2.5 py-1 bg-white hover:bg-slate-50 text-[8px] font-black uppercase tracking-wider text-slate-700 border border-[#E2E1DA] rounded-[2px] whitespace-nowrap transition-all cursor-pointer"
-            >
-              {q}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Input Box */}
-      <form onSubmit={handleSendMessage} className="p-3 border-t border-[#E2E1DA] bg-white flex items-center gap-2 flex-shrink-0">
-        <input
-          type="text"
-          value={inputQuery}
-          onChange={(e) => setInputQuery(e.target.value)}
-          placeholder={batch ? "Ask about schedule, faculty emails, or student messages..." : "Select batch to chat..."}
-          disabled={!batch || isSending}
-          className="flex-1 text-xs px-3 py-2 border border-[#E2E1DA] rounded-[2px] focus:outline-none focus:border-slate-800 disabled:bg-[#FAF9F5] disabled:text-slate-400 transition-all font-sans"
-        />
-        <button
-          type="submit"
-          disabled={!batch || !inputQuery.trim() || isSending}
-          className="p-2 bg-slate-900 border border-slate-900 hover:bg-slate-800 disabled:bg-slate-100 text-white disabled:text-slate-300 rounded-[2px] transition-all cursor-pointer"
-        >
-          <Send className="w-3.5 h-3.5" />
-        </button>
-      </form>
-    </div>
+    </motion.div>
   );
 }

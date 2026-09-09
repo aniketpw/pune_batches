@@ -333,8 +333,17 @@ function parseRawDbRows(rows) {
     const batchCode = (row[batchCodeIdx] || "").toString().trim();
     const batchFaculty = (row[batchFacultyIdx] || "").toString().trim();
     if (!batchCode && !batchFaculty) continue;
-    const day = (row[dayIdx] || "").toString().trim();
+    let day = (row[dayIdx] || "").toString().trim();
     const lectureDate = (row[dateIdx] || "").toString().trim();
+    if (!day && lectureDate) {
+      try {
+        const parsed = new Date(lectureDate);
+        if (!isNaN(parsed.getTime())) {
+          day = parsed.toLocaleDateString("en-US", { weekday: "short" });
+        }
+      } catch {
+      }
+    }
     const startTime = (row[startIdx] || "").toString().trim();
     const endTime = (row[endIdx] || "").toString().trim();
     const timeRange = (row[timeIdx] || (startTime && endTime ? `${startTime} - ${endTime}` : "")).toString().trim();
@@ -743,6 +752,303 @@ app.post("/api/update-batch-links", async (req, res) => {
     });
   }
 });
+var extraClassCache = /* @__PURE__ */ new Map();
+var EXTRA_CLASS_SPREADSHEET_ID = "1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4";
+function parseDateToIso(rawDate, currentYearStr) {
+  if (!rawDate) return null;
+  const str = String(rawDate).trim();
+  if (!str) return null;
+  const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (isoMatch) {
+    const y = isoMatch[1];
+    const m = isoMatch[2].padStart(2, "0");
+    const d = isoMatch[3].padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const monthMap = {
+    jan: "01",
+    feb: "02",
+    mar: "03",
+    apr: "04",
+    may: "05",
+    jun: "06",
+    jul: "07",
+    aug: "08",
+    sep: "09",
+    sept: "09",
+    oct: "10",
+    nov: "11",
+    dec: "12"
+  };
+  const mmmMatch = str.match(/^(\d{1,2})[-/\s]+([a-zA-Z]{3,4})[-/\s]*(\d{2,4})?$/);
+  if (mmmMatch) {
+    const d = mmmMatch[1].padStart(2, "0");
+    const monStr = mmmMatch[2].toLowerCase().substring(0, 3);
+    const m = monthMap[monStr] || monthMap[mmmMatch[2].toLowerCase()];
+    if (m) {
+      let y = mmmMatch[3];
+      if (!y) {
+        y = currentYearStr;
+      } else if (y.length === 2) {
+        y = `20${y}`;
+      }
+      return `${y}-${m}-${d}`;
+    }
+  }
+  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+  if (dmyMatch) {
+    const d = dmyMatch[1].padStart(2, "0");
+    const m = dmyMatch[2].padStart(2, "0");
+    let y = dmyMatch[3];
+    if (y.length === 2) y = `20${y}`;
+    return `${y}-${m}-${d}`;
+  }
+  const num = Number(str);
+  if (!isNaN(num) && num > 4e4 && num < 6e4) {
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    const target = new Date(epoch.getTime() + num * 864e5);
+    const y = target.getUTCFullYear();
+    const m = String(target.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(target.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, "0");
+    const d = String(parsed.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+}
+async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
+  const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
+  const cached = extraClassCache.get(cacheKey);
+  if (!forceRefresh && cached && Date.now() - cached.timestamp < 2 * 60 * 1e3) {
+    return cached.data;
+  }
+  const metaRes = await sheets.spreadsheets.get({
+    spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID
+  });
+  const allSheets = metaRes.data.sheets || [];
+  const IGNORED_TABS = ["reference", "sohel", "osmanabad", "instructions", "readme", "template"];
+  const centerSheets = allSheets.filter((s) => {
+    const title = (s.properties?.title || "").trim();
+    if (!title) return false;
+    const lower = title.toLowerCase();
+    return !IGNORED_TABS.some((ign) => lower.includes(ign));
+  });
+  const sheetResults = await Promise.all(
+    centerSheets.map(async (sheet) => {
+      const sheetTitle = sheet.properties?.title || "";
+      try {
+        const valuesRes = await sheets.spreadsheets.values.get({
+          spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+          range: `'${sheetTitle}'!A1:N`
+        });
+        return {
+          sheetTitle,
+          rows: valuesRes.data.values || []
+        };
+      } catch (e) {
+        console.warn(`[Extra Class] Failed to fetch tab '${sheetTitle}':`, e.message);
+        return { sheetTitle, rows: [] };
+      }
+    })
+  );
+  const now = /* @__PURE__ */ new Date();
+  const todayIstParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(now);
+  const tomorrowDateObj = new Date(now.getTime() + 24 * 60 * 60 * 1e3);
+  const tomorrowIstParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(tomorrowDateObj);
+  const currentYearStr = todayIstParts.split("-")[0];
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const formatIsoDisplay = (iso) => {
+    const [y, m, d] = iso.split("-");
+    return `${d}-${monthNames[parseInt(m, 10) - 1]}-${y}`;
+  };
+  const todayDisplay = formatIsoDisplay(todayIstParts);
+  const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
+  const allLectures = [];
+  const centersFound = /* @__PURE__ */ new Set();
+  for (const { sheetTitle, rows } of sheetResults) {
+    if (!rows || rows.length === 0) continue;
+    centersFound.add(sheetTitle);
+    let headerRowIdx = 0;
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+      const nonEmpty = (rows[i] || []).filter((c) => String(c || "").trim() !== "");
+      if (nonEmpty.length >= 2) {
+        headerRowIdx = i;
+        break;
+      }
+    }
+    const headerRow = (rows[headerRowIdx] || []).map((h) => String(h || "").trim().toLowerCase());
+    let batchCol = 0;
+    let dayCol = 1;
+    let dateCol = 2;
+    let facultyCol = 3;
+    let inTimeCol = 4;
+    let outTimeCol = 5;
+    let classTypeCol = 6;
+    let teacherCol = 7;
+    let subjectCol = 8;
+    let bmCol = 9;
+    let announcementCol = 10;
+    let roomCol = 11;
+    let statusCol = 12;
+    headerRow.forEach((h, idx) => {
+      if (h.includes("batch")) batchCol = idx;
+      else if (h.includes("day")) dayCol = idx;
+      else if (h.includes("date")) dateCol = idx;
+      else if (h.includes("faculty") && !h.includes("name")) facultyCol = idx;
+      else if (h.includes("in time") || h.includes("start") || h === "in") inTimeCol = idx;
+      else if (h.includes("out time") || h.includes("end") || h === "out") outTimeCol = idx;
+      else if (h.includes("doubts") || h.includes("test") || h.includes("class type")) classTypeCol = idx;
+      else if (h.includes("teacher") || h.includes("faculty") && h.includes("name")) teacherCol = idx;
+      else if (h.includes("subject")) subjectCol = idx;
+      else if (h.includes("bm") || h.includes("manager")) bmCol = idx;
+      else if (h.includes("announcement") || h.includes("message")) announcementCol = idx;
+      else if (h.includes("room")) roomCol = idx;
+      else if (h.includes("status") || h.includes("done") || h.includes("announced") || h.includes("action")) statusCol = idx;
+    });
+    const statusColLetter = indexToColLetter(statusCol);
+    for (let r = headerRowIdx + 1; r < rows.length; r++) {
+      const row = rows[r] || [];
+      const batchRaw = String(row[batchCol] || "").trim();
+      if (!batchRaw) continue;
+      if (batchRaw.toLowerCase().includes("batch") && batchRaw.toLowerCase().includes("code")) continue;
+      let day = String(row[dayCol] || "").trim();
+      const rawDate = String(row[dateCol] || "").trim();
+      const facultyCode = String(row[facultyCol] || "").trim();
+      const inTime = String(row[inTimeCol] || "").trim();
+      const outTime = String(row[outTimeCol] || "").trim();
+      const classType = String(row[classTypeCol] || "").trim();
+      const teacherName = String(row[teacherCol] || "").trim();
+      const subject = String(row[subjectCol] || "").trim();
+      const bmName = String(row[bmCol] || "").trim();
+      let announcement = String(row[announcementCol] || "").trim();
+      const room = String(row[roomCol] || "").trim();
+      const rawStatus = String(row[statusCol] || "").trim();
+      const statusLower = rawStatus.toLowerCase();
+      const isDone = ["done", "announced", "yes", "ok", "completed", "true", "checked", "sent"].some((s) => statusLower.includes(s));
+      const isoDate = parseDateToIso(rawDate, currentYearStr);
+      let displayDate = rawDate;
+      let isToday = false;
+      let isTomorrow = false;
+      let isPast = false;
+      let isUpcoming = false;
+      if (isoDate) {
+        displayDate = formatIsoDisplay(isoDate);
+        if (isoDate === todayIstParts) {
+          isToday = true;
+        } else if (isoDate === tomorrowIstParts) {
+          isTomorrow = true;
+        } else if (isoDate < todayIstParts) {
+          isPast = true;
+        } else {
+          isUpcoming = true;
+        }
+        if (!day) {
+          try {
+            const [y, m, d] = isoDate.split("-").map(Number);
+            const dObj = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+            day = dObj.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+          } catch {
+          }
+        }
+      } else {
+        const lowerDate = rawDate.toLowerCase();
+        if (lowerDate.includes("today")) isToday = true;
+        else if (lowerDate.includes("tomorrow")) isTomorrow = true;
+      }
+      if (!announcement) {
+        announcement = `\u{1F4E2} *Extra Lecture Announcement*
+
+\u{1F4CC} *Batch:* ${batchRaw}
+\u{1F4C5} *Date & Day:* ${displayDate || rawDate} (${day || "Scheduled"})
+\u23F0 *Time:* ${inTime || "TBD"} - ${outTime || "TBD"}
+\u{1F4DA} *Subject:* ${subject || "Special Lecture"}
+\u{1F468}\u200D\u{1F3EB} *Faculty:* ${teacherName || facultyCode || "Assigned Faculty"}
+\u{1F3E2} *Room / Venue:* ${room || "Assigned Room"}
+
+\u26A0\uFE0F *Mandatory for all enrolled students. Please report on time.*`;
+      }
+      const category = getCategory(batchRaw);
+      const phase = getPhase(batchRaw);
+      const timeSlot = getTimeSlot(batchRaw);
+      allLectures.push({
+        id: `${sheetTitle}_${r + 1}`,
+        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+        sheetTitle,
+        center: sheetTitle,
+        rowIndex: r + 1,
+        statusColLetter,
+        batchCode: batchRaw,
+        formattedBatchName: batchRaw.toUpperCase().startsWith("VIDYAPEETH") || batchRaw.toUpperCase().startsWith("TUITION") || batchRaw.toUpperCase().startsWith("SIP") ? batchRaw : batchRaw.toUpperCase().startsWith("T") ? `Tuition ${batchRaw}` : batchRaw.toUpperCase().startsWith("S") ? `SIP ${batchRaw}` : `Vidyapeeth ${batchRaw}`,
+        category,
+        phase,
+        timeSlot,
+        day,
+        rawDate,
+        isoDate,
+        displayDate,
+        facultyCode,
+        inTime,
+        outTime,
+        timeRange: inTime && outTime ? `${inTime} - ${outTime}` : inTime || outTime || "Time TBA",
+        classType: classType || "Extra Lecture",
+        teacherName,
+        subject,
+        bmName,
+        announcement,
+        room: room ? room.toLowerCase().startsWith("room") ? room : `Room ${room}` : "Room TBA",
+        rawStatus,
+        isDone,
+        isToday,
+        isTomorrow,
+        isPast,
+        isUpcoming
+      });
+    }
+  }
+  const todayCount = allLectures.filter((c) => c.isToday).length;
+  const tomorrowCount = allLectures.filter((c) => c.isTomorrow).length;
+  const upcomingCount = allLectures.filter((c) => c.isUpcoming).length;
+  const pastCount = allLectures.filter((c) => c.isPast).length;
+  const doneCount = allLectures.filter((c) => c.isDone).length;
+  const pendingCount = allLectures.filter((c) => c.isToday && !c.isDone).length;
+  const responsePayload = {
+    todayDate: todayIstParts,
+    tomorrowDate: tomorrowIstParts,
+    todayDateDisplay: todayDisplay,
+    tomorrowDateDisplay: tomorrowDisplay,
+    centers: Array.from(centersFound),
+    classes: allLectures,
+    counts: {
+      today: todayCount,
+      tomorrow: tomorrowCount,
+      upcoming: upcomingCount,
+      past: pastCount,
+      pending: pendingCount,
+      done: doneCount,
+      total: allLectures.length
+    }
+  };
+  extraClassCache.set(cacheKey, {
+    data: responsePayload,
+    timestamp: Date.now()
+  });
+  return responsePayload;
+}
 app.get("/api/timetable/batch-schedule", async (req, res) => {
   try {
     const auth = getGoogleAuth(req);
@@ -832,6 +1138,63 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
         }
       }
     }
+    try {
+      const extraPayload = await fetchAllExtraClassLectures(sheets, forceRefresh);
+      const matchingExtra = (extraPayload.classes || []).filter(
+        (ec) => isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
+      );
+      if (matchingExtra.length > 0) {
+        const { now } = getIstDateInfo();
+        for (const ec of matchingExtra) {
+          const extraLecture = {
+            day: ec.day || "Scheduled",
+            lectureDate: ec.displayDate || ec.rawDate || "",
+            startTime: ec.inTime || "",
+            endTime: ec.outTime || "",
+            timeRange: ec.timeRange || (ec.inTime && ec.outTime ? `${ec.inTime} - ${ec.outTime}` : "Extra Class"),
+            batchFaculty: `${ec.batchCode} -/- ${ec.facultyCode || ec.teacherName || "Faculty"}`,
+            batchCode: ec.batchCode,
+            facultyCode: ec.facultyCode || "",
+            subject: ec.subject || "Special Lecture",
+            teacherEmail: ec.bmName || "",
+            teacherName: ec.teacherName || "",
+            room: ec.room || "",
+            announcement: ec.announcement || "",
+            isToday: !!ec.isToday,
+            isExtraClass: true,
+            status: computeLectureStatus(ec.inTime, ec.outTime, !!ec.isToday, now),
+            rowIndex: ec.rowIndex
+          };
+          foundLectures.push(extraLecture);
+        }
+        if (!resolvedCenter && matchingExtra[0]?.center) {
+          resolvedCenter = matchingExtra[0].center;
+        }
+        if (!spreadsheetTitle) {
+          spreadsheetTitle = "Raw_DB & Extra Class Sheet";
+        }
+      }
+    } catch (extraErr) {
+      console.warn("Could not query extra class sheet for batch-schedule:", extraErr.message);
+    }
+    foundLectures = deduplicateLectures(foundLectures);
+    const dayWeight = {
+      MON: 1,
+      TUE: 2,
+      WED: 3,
+      THU: 4,
+      FRI: 5,
+      SAT: 6,
+      SUN: 7
+    };
+    foundLectures.sort((a, b) => {
+      const aD = (a.day || "").trim().substring(0, 3).toUpperCase();
+      const bD = (b.day || "").trim().substring(0, 3).toUpperCase();
+      const wA = dayWeight[aD] || 99;
+      const wB = dayWeight[bD] || 99;
+      if (wA !== wB) return wA - wB;
+      return (a.startTime || "").localeCompare(b.startTime || "");
+    });
     const { dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
     const todayLectures = foundLectures.filter((l) => l.isToday);
     const daysSet = /* @__PURE__ */ new Set();
@@ -1079,309 +1442,13 @@ app.get("/api/custom-modules/data", async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to fetch custom module sheet data." });
   }
 });
-var extraClassCache = /* @__PURE__ */ new Map();
-var EXTRA_CLASS_SPREADSHEET_ID = "1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4";
-function parseDateToIso(rawDate, currentYearStr) {
-  if (!rawDate) return null;
-  const str = String(rawDate).trim();
-  if (!str) return null;
-  const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (isoMatch) {
-    const y = isoMatch[1];
-    const m = isoMatch[2].padStart(2, "0");
-    const d = isoMatch[3].padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  const monthMap = {
-    jan: "01",
-    feb: "02",
-    mar: "03",
-    apr: "04",
-    may: "05",
-    jun: "06",
-    jul: "07",
-    aug: "08",
-    sep: "09",
-    sept: "09",
-    oct: "10",
-    nov: "11",
-    dec: "12"
-  };
-  const mmmMatch = str.match(/^(\d{1,2})[-/\s]+([a-zA-Z]{3,4})[-/\s]*(\d{2,4})?$/);
-  if (mmmMatch) {
-    const d = mmmMatch[1].padStart(2, "0");
-    const monStr = mmmMatch[2].toLowerCase().substring(0, 3);
-    const m = monthMap[monStr] || monthMap[mmmMatch[2].toLowerCase()];
-    if (m) {
-      let y = mmmMatch[3];
-      if (!y) {
-        y = currentYearStr;
-      } else if (y.length === 2) {
-        y = `20${y}`;
-      }
-      return `${y}-${m}-${d}`;
-    }
-  }
-  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
-  if (dmyMatch) {
-    const d = dmyMatch[1].padStart(2, "0");
-    const m = dmyMatch[2].padStart(2, "0");
-    let y = dmyMatch[3];
-    if (y.length === 2) y = `20${y}`;
-    return `${y}-${m}-${d}`;
-  }
-  const num = Number(str);
-  if (!isNaN(num) && num > 4e4 && num < 6e4) {
-    const epoch = new Date(Date.UTC(1899, 11, 30));
-    const target = new Date(epoch.getTime() + num * 864e5);
-    const y = target.getUTCFullYear();
-    const m = String(target.getUTCMonth() + 1).padStart(2, "0");
-    const d = String(target.getUTCDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  const parsed = new Date(str);
-  if (!isNaN(parsed.getTime())) {
-    const y = parsed.getFullYear();
-    const m = String(parsed.getMonth() + 1).padStart(2, "0");
-    const d = String(parsed.getDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  return null;
-}
 app.get("/api/extra-classes/schedule", async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === "true";
-    const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
-    const cached = extraClassCache.get(cacheKey);
-    if (!forceRefresh && cached && Date.now() - cached.timestamp < 2 * 60 * 1e3) {
-      return res.json(cached.data);
-    }
     const auth = getGoogleAuth(req);
     const sheets = google.sheets({ version: "v4", auth });
-    const metaRes = await sheets.spreadsheets.get({
-      spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID
-    });
-    const allSheets = metaRes.data.sheets || [];
-    const IGNORED_TABS = ["reference", "sohel", "osmanabad", "instructions", "readme", "template"];
-    const centerSheets = allSheets.filter((s) => {
-      const title = (s.properties?.title || "").trim();
-      if (!title) return false;
-      const lower = title.toLowerCase();
-      return !IGNORED_TABS.some((ign) => lower.includes(ign));
-    });
-    const sheetResults = await Promise.all(
-      centerSheets.map(async (sheet) => {
-        const sheetTitle = sheet.properties?.title || "";
-        try {
-          const valuesRes = await sheets.spreadsheets.values.get({
-            spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-            range: `'${sheetTitle}'!A1:N`
-          });
-          return {
-            sheetTitle,
-            rows: valuesRes.data.values || []
-          };
-        } catch (e) {
-          console.warn(`[Extra Class] Failed to fetch tab '${sheetTitle}':`, e.message);
-          return { sheetTitle, rows: [] };
-        }
-      })
-    );
-    const now = /* @__PURE__ */ new Date();
-    const todayIstParts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Kolkata",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    }).format(now);
-    const tomorrowDateObj = new Date(now.getTime() + 24 * 60 * 60 * 1e3);
-    const tomorrowIstParts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Kolkata",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    }).format(tomorrowDateObj);
-    const currentYearStr = todayIstParts.split("-")[0];
-    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const formatIsoDisplay = (iso) => {
-      const [y, m, d] = iso.split("-");
-      return `${d}-${monthNames[parseInt(m, 10) - 1]}-${y}`;
-    };
-    const todayDisplay = formatIsoDisplay(todayIstParts);
-    const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
-    const allLectures = [];
-    const centersFound = /* @__PURE__ */ new Set();
-    for (const { sheetTitle, rows } of sheetResults) {
-      if (!rows || rows.length === 0) continue;
-      centersFound.add(sheetTitle);
-      let headerRowIdx = 0;
-      for (let i = 0; i < Math.min(rows.length, 5); i++) {
-        const nonEmpty = (rows[i] || []).filter((c) => String(c || "").trim() !== "");
-        if (nonEmpty.length >= 2) {
-          headerRowIdx = i;
-          break;
-        }
-      }
-      const headerRow = (rows[headerRowIdx] || []).map((h) => String(h || "").trim().toLowerCase());
-      let batchCol = 0;
-      let dayCol = 1;
-      let dateCol = 2;
-      let facultyCol = 3;
-      let inTimeCol = 4;
-      let outTimeCol = 5;
-      let classTypeCol = 6;
-      let teacherCol = 7;
-      let subjectCol = 8;
-      let bmCol = 9;
-      let announcementCol = 10;
-      let roomCol = 11;
-      let statusCol = 12;
-      headerRow.forEach((h, idx) => {
-        if (h.includes("batch")) batchCol = idx;
-        else if (h.includes("day")) dayCol = idx;
-        else if (h.includes("date")) dateCol = idx;
-        else if (h.includes("faculty") && !h.includes("name")) facultyCol = idx;
-        else if (h.includes("in time") || h.includes("start") || h === "in") inTimeCol = idx;
-        else if (h.includes("out time") || h.includes("end") || h === "out") outTimeCol = idx;
-        else if (h.includes("doubts") || h.includes("test") || h.includes("class type")) classTypeCol = idx;
-        else if (h.includes("teacher") || h.includes("faculty") && h.includes("name")) teacherCol = idx;
-        else if (h.includes("subject")) subjectCol = idx;
-        else if (h.includes("bm") || h.includes("manager")) bmCol = idx;
-        else if (h.includes("announcement") || h.includes("message")) announcementCol = idx;
-        else if (h.includes("room")) roomCol = idx;
-        else if (h.includes("status") || h.includes("done") || h.includes("announced") || h.includes("action")) statusCol = idx;
-      });
-      const statusColLetter = indexToColLetter(statusCol);
-      for (let r = headerRowIdx + 1; r < rows.length; r++) {
-        const row = rows[r] || [];
-        const batchRaw = String(row[batchCol] || "").trim();
-        if (!batchRaw) continue;
-        if (batchRaw.toLowerCase().includes("batch") && batchRaw.toLowerCase().includes("code")) continue;
-        const day = String(row[dayCol] || "").trim();
-        const rawDate = String(row[dateCol] || "").trim();
-        const facultyCode = String(row[facultyCol] || "").trim();
-        const inTime = String(row[inTimeCol] || "").trim();
-        const outTime = String(row[outTimeCol] || "").trim();
-        const classType = String(row[classTypeCol] || "").trim();
-        const teacherName = String(row[teacherCol] || "").trim();
-        const subject = String(row[subjectCol] || "").trim();
-        const bmName = String(row[bmCol] || "").trim();
-        let announcement = String(row[announcementCol] || "").trim();
-        const room = String(row[roomCol] || "").trim();
-        const rawStatus = String(row[statusCol] || "").trim();
-        const statusLower = rawStatus.toLowerCase();
-        const isDone = ["done", "announced", "yes", "ok", "completed", "true", "checked", "sent"].some((s) => statusLower.includes(s));
-        const isoDate = parseDateToIso(rawDate, currentYearStr);
-        let displayDate = rawDate;
-        let isToday = false;
-        let isTomorrow = false;
-        let isPast = false;
-        let isUpcoming = false;
-        if (isoDate) {
-          displayDate = formatIsoDisplay(isoDate);
-          if (isoDate === todayIstParts) {
-            isToday = true;
-          } else if (isoDate === tomorrowIstParts) {
-            isTomorrow = true;
-          } else if (isoDate < todayIstParts) {
-            isPast = true;
-          } else {
-            isUpcoming = true;
-          }
-        } else {
-          const lowerDate = rawDate.toLowerCase();
-          if (lowerDate.includes("today")) isToday = true;
-          else if (lowerDate.includes("tomorrow")) isTomorrow = true;
-        }
-        if (!announcement) {
-          announcement = `\u{1F4E2} *Extra Lecture Announcement*
-
-\u{1F4CC} *Batch:* ${batchRaw}
-\u{1F4C5} *Date & Day:* ${displayDate || rawDate} (${day || "Scheduled"})
-\u23F0 *Time:* ${inTime || "TBD"} - ${outTime || "TBD"}
-\u{1F4DA} *Subject:* ${subject || "Special Lecture"}
-\u{1F468}\u200D\u{1F3EB} *Faculty:* ${teacherName || facultyCode || "Assigned Faculty"}
-\u{1F3E2} *Room / Venue:* ${room || "Assigned Room"}
-
-\u26A0\uFE0F *Mandatory for all enrolled students. Please report on time.*`;
-        }
-        const category = getCategory(batchRaw);
-        const phase = getPhase(batchRaw);
-        const timeSlot = getTimeSlot(batchRaw);
-        allLectures.push({
-          id: `${sheetTitle}_${r + 1}`,
-          spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-          sheetTitle,
-          center: sheetTitle,
-          rowIndex: r + 1,
-          statusColLetter,
-          batchCode: batchRaw,
-          formattedBatchName: batchRaw.toUpperCase().startsWith("VIDYAPEETH") || batchRaw.toUpperCase().startsWith("TUITION") || batchRaw.toUpperCase().startsWith("SIP") ? batchRaw : batchRaw.toUpperCase().startsWith("T") ? `Tuition ${batchRaw}` : batchRaw.toUpperCase().startsWith("S") ? `SIP ${batchRaw}` : `Vidyapeeth ${batchRaw}`,
-          category,
-          phase,
-          timeSlot,
-          day,
-          rawDate,
-          isoDate,
-          displayDate,
-          facultyCode,
-          inTime,
-          outTime,
-          timeRange: inTime && outTime ? `${inTime} - ${outTime}` : inTime || outTime || "Time TBA",
-          classType: classType || "Extra Lecture",
-          teacherName,
-          subject,
-          bmName,
-          announcement,
-          room: room ? room.toLowerCase().startsWith("room") ? room : `Room ${room}` : "Room TBA",
-          rawStatus,
-          isDone,
-          isToday,
-          isTomorrow,
-          isPast,
-          isUpcoming
-        });
-      }
-    }
-    allLectures.sort((a, b) => {
-      const getWeight = (item) => item.isToday ? 1 : item.isTomorrow ? 2 : item.isUpcoming ? 3 : 4;
-      const wA = getWeight(a);
-      const wB = getWeight(b);
-      if (wA !== wB) return wA - wB;
-      if (a.isoDate && b.isoDate && a.isoDate !== b.isoDate) {
-        return a.isoDate.localeCompare(b.isoDate);
-      }
-      return (a.inTime || "").localeCompare(b.inTime || "");
-    });
-    const todayCount = allLectures.filter((l) => l.isToday).length;
-    const tomorrowCount = allLectures.filter((l) => l.isTomorrow).length;
-    const upcomingCount = allLectures.filter((l) => l.isUpcoming).length;
-    const pastCount = allLectures.filter((l) => l.isPast).length;
-    const pendingCount = allLectures.filter((l) => (l.isToday || l.isTomorrow) && !l.isDone).length;
-    const doneCount = allLectures.filter((l) => (l.isToday || l.isTomorrow) && l.isDone).length;
-    const responsePayload = {
-      spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-      todayDate: todayIstParts,
-      tomorrowDate: tomorrowIstParts,
-      todayDateDisplay: todayDisplay,
-      tomorrowDateDisplay: tomorrowDisplay,
-      centers: Array.from(centersFound),
-      classes: allLectures,
-      counts: {
-        today: todayCount,
-        tomorrow: tomorrowCount,
-        upcoming: upcomingCount,
-        past: pastCount,
-        pending: pendingCount,
-        done: doneCount,
-        total: allLectures.length
-      }
-    };
-    extraClassCache.set(cacheKey, {
-      data: responsePayload,
-      timestamp: Date.now()
-    });
-    res.json(responsePayload);
+    const payload = await fetchAllExtraClassLectures(sheets, forceRefresh);
+    res.json(payload);
   } catch (err) {
     console.error("API Error (/api/extra-classes/schedule):", err);
     res.status(500).json({ error: err.message || "Failed to aggregate extra classes." });
@@ -1495,14 +1562,17 @@ Please provide a highly polished, professional, and actionable academic briefing
 Keep the output clean, encouraging, professional, and under 400 words.`;
     if (openRouterKey.startsWith("sk-or-v1-")) {
       const candidateModels = [
-        "nvidia/nemotron-3.5-lightning:free",
-        "nex-agi/nex-n2.5-mini:free",
-        "google/gemma-4-26b-a4b-it:free"
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "mistralai/mistral-7b-instruct:free"
       ];
       for (const candidateModel of candidateModels) {
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
           const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
+            signal: controller.signal,
             headers: {
               "Authorization": `Bearer ${openRouterKey}`,
               "Content-Type": "application/json",
@@ -1514,6 +1584,7 @@ Keep the output clean, encouraging, professional, and under 400 words.`;
               messages: [{ role: "user", content: prompt }]
             })
           });
+          clearTimeout(timeoutId);
           if (orRes.ok) {
             const data = await orRes.json();
             const text = data.choices?.[0]?.message?.content;
@@ -1522,6 +1593,7 @@ Keep the output clean, encouraging, professional, and under 400 words.`;
         } catch {
         }
       }
+      return res.json({ explanation: fallbackText });
     }
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
@@ -1576,16 +1648,18 @@ Context: The user is currently viewing batch "${contextBatch.displayName}" (Cate
         content: message
       });
       const candidateModels = [
-        "nvidia/nemotron-3.5-lightning:free",
-        "nex-agi/nex-n2.5-mini:free",
-        "google/gemma-4-26b-a4b-it:free",
-        "google/gemma-4-31b-it:free"
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "mistralai/mistral-7b-instruct:free"
       ];
       let openRouterReply = "";
       for (const candidateModel of candidateModels) {
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
           const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
+            signal: controller.signal,
             headers: {
               "Authorization": `Bearer ${openRouterKey}`,
               "Content-Type": "application/json",
@@ -1597,6 +1671,7 @@ Context: The user is currently viewing batch "${contextBatch.displayName}" (Cate
               messages: openRouterMessages
             })
           });
+          clearTimeout(timeoutId);
           if (orRes.ok) {
             const data = await orRes.json();
             openRouterReply = data.choices?.[0]?.message?.content || "";
@@ -1608,6 +1683,14 @@ Context: The user is currently viewing batch "${contextBatch.displayName}" (Cate
       }
       if (openRouterReply) {
         return res.json({ reply: openRouterReply });
+      } else {
+        return res.json({
+          reply: `(Offline AI Copilot) Here is a quick academic tip for **${contextBatch?.displayName || "this batch"}**:
+
+${scheduleText ? `\u{1F4C5} **Schedule Context:** ${scheduleText}
+
+` : ""}Ensure all lecture study materials, handouts, and DPP keys are uploaded to the corresponding subject drive folder to keep students aligned.`
+        });
       }
     }
     const formattedContents = [];

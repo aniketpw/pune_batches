@@ -445,8 +445,16 @@ app.use((req, _res, next) => {
       const batchFaculty = (row[batchFacultyIdx] || "").toString().trim();
       if (!batchCode && !batchFaculty) continue;
 
-      const day = (row[dayIdx] || "").toString().trim();
+      let day = (row[dayIdx] || "").toString().trim();
       const lectureDate = (row[dateIdx] || "").toString().trim();
+      if (!day && lectureDate) {
+        try {
+          const parsed = new Date(lectureDate);
+          if (!isNaN(parsed.getTime())) {
+            day = parsed.toLocaleDateString("en-US", { weekday: "short" });
+          }
+        } catch {}
+      }
       const startTime = (row[startIdx] || "").toString().trim();
       const endTime = (row[endIdx] || "").toString().trim();
       const timeRange = (row[timeIdx] || (startTime && endTime ? `${startTime} - ${endTime}` : "")).toString().trim();
@@ -974,7 +982,336 @@ app.use((req, _res, next) => {
     }
   });
 
-  // API: Get Batch Timetable Schedule from Raw_DB
+  // ==========================================
+  // Extra Classes Aggregator & Live Cache
+  // ==========================================
+  const extraClassCache = new Map<string, { data: any; timestamp: number }>();
+  const EXTRA_CLASS_SPREADSHEET_ID = '1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4';
+
+  function parseDateToIso(rawDate: string, currentYearStr: string): string | null {
+    if (!rawDate) return null;
+    const str = String(rawDate).trim();
+    if (!str) return null;
+
+    // Check YYYY-MM-DD or YYYY/MM/DD
+    const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (isoMatch) {
+      const y = isoMatch[1];
+      const m = isoMatch[2].padStart(2, '0');
+      const d = isoMatch[3].padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    // Check DD-MMM-YYYY or DD-MMM (e.g. 9-Sep-2026, 09-Sep-2026, 9-Sep, 10-Sept-2026)
+    const monthMap: Record<string, string> = {
+      jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+      jul: '07', aug: '08', sep: '09', sept: '09', oct: '10', nov: '11', dec: '12'
+    };
+    const mmmMatch = str.match(/^(\d{1,2})[-/\s]+([a-zA-Z]{3,4})[-/\s]*(\d{2,4})?$/);
+    if (mmmMatch) {
+      const d = mmmMatch[1].padStart(2, '0');
+      const monStr = mmmMatch[2].toLowerCase().substring(0, 3);
+      const m = monthMap[monStr] || monthMap[mmmMatch[2].toLowerCase()];
+      if (m) {
+        let y = mmmMatch[3];
+        if (!y) {
+          y = currentYearStr;
+        } else if (y.length === 2) {
+          y = `20${y}`;
+        }
+        return `${y}-${m}-${d}`;
+      }
+    }
+
+    // Check DD/MM/YYYY or DD-MM-YYYY
+    const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+    if (dmyMatch) {
+      const d = dmyMatch[1].padStart(2, '0');
+      const m = dmyMatch[2].padStart(2, '0');
+      let y = dmyMatch[3];
+      if (y.length === 2) y = `20${y}`;
+      return `${y}-${m}-${d}`;
+    }
+
+    // Check Excel serial number (e.g. 46274)
+    const num = Number(str);
+    if (!isNaN(num) && num > 40000 && num < 60000) {
+      const epoch = new Date(Date.UTC(1899, 11, 30));
+      const target = new Date(epoch.getTime() + num * 86400000);
+      const y = target.getUTCFullYear();
+      const m = String(target.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(target.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    const parsed = new Date(str);
+    if (!isNaN(parsed.getTime())) {
+      const y = parsed.getFullYear();
+      const m = String(parsed.getMonth() + 1).padStart(2, '0');
+      const d = String(parsed.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    return null;
+  }
+
+  async function fetchAllExtraClassLectures(sheets: any, forceRefresh = false): Promise<any> {
+    const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
+    const cached = extraClassCache.get(cacheKey);
+
+    if (!forceRefresh && cached && Date.now() - cached.timestamp < 2 * 60 * 1000) {
+      return cached.data;
+    }
+
+    // 1. Get metadata of all sheets / tabs in the Extra Class workbook
+    const metaRes = await sheets.spreadsheets.get({
+      spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+    });
+    const allSheets = metaRes.data.sheets || [];
+
+    // Tabs to ignore (not center lecture schedules)
+    const IGNORED_TABS = ['reference', 'sohel', 'osmanabad', 'instructions', 'readme', 'template'];
+    const centerSheets = allSheets.filter((s: any) => {
+      const title = (s.properties?.title || '').trim();
+      if (!title) return false;
+      const lower = title.toLowerCase();
+      return !IGNORED_TABS.some((ign) => lower.includes(ign));
+    });
+
+    // 2. Concurrently fetch rows from all center sheets
+    const sheetResults = await Promise.all(
+      centerSheets.map(async (sheet: any) => {
+        const sheetTitle = sheet.properties?.title || '';
+        try {
+          const valuesRes = await sheets.spreadsheets.values.get({
+            spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+            range: `'${sheetTitle}'!A1:N`,
+          });
+          return {
+            sheetTitle,
+            rows: valuesRes.data.values || [],
+          };
+        } catch (e: any) {
+          console.warn(`[Extra Class] Failed to fetch tab '${sheetTitle}':`, e.message);
+          return { sheetTitle, rows: [] };
+        }
+      })
+    );
+
+    // 3. Compute IST reference dates
+    const now = new Date();
+    const todayIstParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(now);
+
+    const tomorrowDateObj = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const tomorrowIstParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(tomorrowDateObj);
+
+    const currentYearStr = todayIstParts.split('-')[0];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    const formatIsoDisplay = (iso: string) => {
+      const [y, m, d] = iso.split('-');
+      return `${d}-${monthNames[parseInt(m, 10) - 1]}-${y}`;
+    };
+
+    const todayDisplay = formatIsoDisplay(todayIstParts);
+    const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
+
+    const allLectures: any[] = [];
+    const centersFound = new Set<string>();
+
+    for (const { sheetTitle, rows } of sheetResults) {
+      if (!rows || rows.length === 0) continue;
+      centersFound.add(sheetTitle);
+
+      let headerRowIdx = 0;
+      for (let i = 0; i < Math.min(rows.length, 5); i++) {
+        const nonEmpty = (rows[i] || []).filter((c: any) => String(c || '').trim() !== '');
+        if (nonEmpty.length >= 2) {
+          headerRowIdx = i;
+          break;
+        }
+      }
+
+      const headerRow = (rows[headerRowIdx] || []).map((h: any) => String(h || '').trim().toLowerCase());
+
+      let batchCol = 0;
+      let dayCol = 1;
+      let dateCol = 2;
+      let facultyCol = 3;
+      let inTimeCol = 4;
+      let outTimeCol = 5;
+      let classTypeCol = 6;
+      let teacherCol = 7;
+      let subjectCol = 8;
+      let bmCol = 9;
+      let announcementCol = 10;
+      let roomCol = 11;
+      let statusCol = 12;
+
+      headerRow.forEach((h: string, idx: number) => {
+        if (h.includes('batch')) batchCol = idx;
+        else if (h.includes('day')) dayCol = idx;
+        else if (h.includes('date')) dateCol = idx;
+        else if (h.includes('faculty') && !h.includes('name')) facultyCol = idx;
+        else if (h.includes('in time') || h.includes('start') || h === 'in') inTimeCol = idx;
+        else if (h.includes('out time') || h.includes('end') || h === 'out') outTimeCol = idx;
+        else if (h.includes('doubts') || h.includes('test') || h.includes('class type')) classTypeCol = idx;
+        else if (h.includes('teacher') || (h.includes('faculty') && h.includes('name'))) teacherCol = idx;
+        else if (h.includes('subject')) subjectCol = idx;
+        else if (h.includes('bm') || h.includes('manager')) bmCol = idx;
+        else if (h.includes('announcement') || h.includes('message')) announcementCol = idx;
+        else if (h.includes('room')) roomCol = idx;
+        else if (h.includes('status') || h.includes('done') || h.includes('announced') || h.includes('action')) statusCol = idx;
+      });
+
+      const statusColLetter = indexToColLetter(statusCol);
+
+      for (let r = headerRowIdx + 1; r < rows.length; r++) {
+        const row = rows[r] || [];
+        const batchRaw = String(row[batchCol] || '').trim();
+        if (!batchRaw) continue;
+
+        if (batchRaw.toLowerCase().includes('batch') && batchRaw.toLowerCase().includes('code')) continue;
+
+        let day = String(row[dayCol] || '').trim();
+        const rawDate = String(row[dateCol] || '').trim();
+        const facultyCode = String(row[facultyCol] || '').trim();
+        const inTime = String(row[inTimeCol] || '').trim();
+        const outTime = String(row[outTimeCol] || '').trim();
+        const classType = String(row[classTypeCol] || '').trim();
+        const teacherName = String(row[teacherCol] || '').trim();
+        const subject = String(row[subjectCol] || '').trim();
+        const bmName = String(row[bmCol] || '').trim();
+        let announcement = String(row[announcementCol] || '').trim();
+        const room = String(row[roomCol] || '').trim();
+        const rawStatus = String(row[statusCol] || '').trim();
+
+        const statusLower = rawStatus.toLowerCase();
+        const isDone = ['done', 'announced', 'yes', 'ok', 'completed', 'true', 'checked', 'sent'].some((s) => statusLower.includes(s));
+
+        const isoDate = parseDateToIso(rawDate, currentYearStr);
+        let displayDate = rawDate;
+        let isToday = false;
+        let isTomorrow = false;
+        let isPast = false;
+        let isUpcoming = false;
+
+        if (isoDate) {
+          displayDate = formatIsoDisplay(isoDate);
+          if (isoDate === todayIstParts) {
+            isToday = true;
+          } else if (isoDate === tomorrowIstParts) {
+            isTomorrow = true;
+          } else if (isoDate < todayIstParts) {
+            isPast = true;
+          } else {
+            isUpcoming = true;
+          }
+
+          // Compute day of week if Day column is empty in sheet
+          if (!day) {
+            try {
+              const [y, m, d] = isoDate.split('-').map(Number);
+              const dObj = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+              day = dObj.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+            } catch {}
+          }
+        } else {
+          const lowerDate = rawDate.toLowerCase();
+          if (lowerDate.includes('today')) isToday = true;
+          else if (lowerDate.includes('tomorrow')) isTomorrow = true;
+        }
+
+        if (!announcement) {
+          announcement = `📢 *Extra Lecture Announcement*\n\n📌 *Batch:* ${batchRaw}\n📅 *Date & Day:* ${displayDate || rawDate} (${day || 'Scheduled'})\n⏰ *Time:* ${inTime || 'TBD'} - ${outTime || 'TBD'}\n📚 *Subject:* ${subject || 'Special Lecture'}\n👨‍🏫 *Faculty:* ${teacherName || facultyCode || 'Assigned Faculty'}\n🏢 *Room / Venue:* ${room || 'Assigned Room'}\n\n⚠️ *Mandatory for all enrolled students. Please report on time.*`;
+        }
+
+        const category = getCategory(batchRaw);
+        const phase = getPhase(batchRaw);
+        const timeSlot = getTimeSlot(batchRaw);
+
+        allLectures.push({
+          id: `${sheetTitle}_${r + 1}`,
+          spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+          sheetTitle,
+          center: sheetTitle,
+          rowIndex: r + 1,
+          statusColLetter,
+          batchCode: batchRaw,
+          formattedBatchName: batchRaw.toUpperCase().startsWith("VIDYAPEETH") || batchRaw.toUpperCase().startsWith("TUITION") || batchRaw.toUpperCase().startsWith("SIP")
+            ? batchRaw
+            : (batchRaw.toUpperCase().startsWith("T") ? `Tuition ${batchRaw}` : batchRaw.toUpperCase().startsWith("S") ? `SIP ${batchRaw}` : `Vidyapeeth ${batchRaw}`),
+          category,
+          phase,
+          timeSlot,
+          day,
+          rawDate,
+          isoDate,
+          displayDate,
+          facultyCode,
+          inTime,
+          outTime,
+          timeRange: inTime && outTime ? `${inTime} - ${outTime}` : inTime || outTime || 'Time TBA',
+          classType: classType || 'Extra Lecture',
+          teacherName,
+          subject,
+          bmName,
+          announcement,
+          room: room ? (room.toLowerCase().startsWith('room') ? room : `Room ${room}`) : 'Room TBA',
+          rawStatus,
+          isDone,
+          isToday,
+          isTomorrow,
+          isPast,
+          isUpcoming,
+        });
+      }
+    }
+
+    const todayCount = allLectures.filter((c) => c.isToday).length;
+    const tomorrowCount = allLectures.filter((c) => c.isTomorrow).length;
+    const upcomingCount = allLectures.filter((c) => c.isUpcoming).length;
+    const pastCount = allLectures.filter((c) => c.isPast).length;
+    const doneCount = allLectures.filter((c) => c.isDone).length;
+    const pendingCount = allLectures.filter((c) => c.isToday && !c.isDone).length;
+
+    const responsePayload = {
+      todayDate: todayIstParts,
+      tomorrowDate: tomorrowIstParts,
+      todayDateDisplay: todayDisplay,
+      tomorrowDateDisplay: tomorrowDisplay,
+      centers: Array.from(centersFound),
+      classes: allLectures,
+      counts: {
+        today: todayCount,
+        tomorrow: tomorrowCount,
+        upcoming: upcomingCount,
+        past: pastCount,
+        pending: pendingCount,
+        done: doneCount,
+        total: allLectures.length,
+      }
+    };
+
+    extraClassCache.set(cacheKey, {
+      data: responsePayload,
+      timestamp: Date.now(),
+    });
+
+    return responsePayload;
+  }
+
+  // API: Get Batch Timetable Schedule from Raw_DB + Extra Class Sheet
   app.get("/api/timetable/batch-schedule", async (req, res) => {
     try {
       const auth = getGoogleAuth(req);
@@ -1080,6 +1417,65 @@ app.use((req, _res, next) => {
           }
         }
       }
+
+      // Step 3: Concurrently check Extra Class Sheet for any extra lectures for this batch
+      try {
+        const extraPayload = await fetchAllExtraClassLectures(sheets, forceRefresh);
+        const matchingExtra = (extraPayload.classes || []).filter((ec: any) =>
+          isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
+        );
+
+        if (matchingExtra.length > 0) {
+          const { now } = getIstDateInfo();
+          for (const ec of matchingExtra) {
+            const extraLecture = {
+              day: ec.day || "Scheduled",
+              lectureDate: ec.displayDate || ec.rawDate || "",
+              startTime: ec.inTime || "",
+              endTime: ec.outTime || "",
+              timeRange: ec.timeRange || (ec.inTime && ec.outTime ? `${ec.inTime} - ${ec.outTime}` : "Extra Class"),
+              batchFaculty: `${ec.batchCode} -/- ${ec.facultyCode || ec.teacherName || "Faculty"}`,
+              batchCode: ec.batchCode,
+              facultyCode: ec.facultyCode || "",
+              subject: ec.subject || "Special Lecture",
+              teacherEmail: ec.bmName || "",
+              teacherName: ec.teacherName || "",
+              room: ec.room || "",
+              announcement: ec.announcement || "",
+              isToday: !!ec.isToday,
+              isExtraClass: true,
+              status: computeLectureStatus(ec.inTime, ec.outTime, !!ec.isToday, now),
+              rowIndex: ec.rowIndex,
+            };
+            foundLectures.push(extraLecture);
+          }
+
+          if (!resolvedCenter && matchingExtra[0]?.center) {
+            resolvedCenter = matchingExtra[0].center;
+          }
+          if (!spreadsheetTitle) {
+            spreadsheetTitle = "Raw_DB & Extra Class Sheet";
+          }
+        }
+      } catch (extraErr: any) {
+        console.warn("Could not query extra class sheet for batch-schedule:", extraErr.message);
+      }
+
+      // Deduplicate foundLectures across Raw_DB and Extra Class sheet
+      foundLectures = deduplicateLectures(foundLectures);
+
+      // Sort foundLectures by Day of Week (Mon -> Sun), then by start time
+      const dayWeight: Record<string, number> = {
+        MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6, SUN: 7
+      };
+      foundLectures.sort((a, b) => {
+        const aD = (a.day || "").trim().substring(0, 3).toUpperCase();
+        const bD = (b.day || "").trim().substring(0, 3).toUpperCase();
+        const wA = dayWeight[aD] || 99;
+        const wB = dayWeight[bD] || 99;
+        if (wA !== wB) return wA - wB;
+        return (a.startTime || "").localeCompare(b.startTime || "");
+      });
 
       const { dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
       const todayLectures = foundLectures.filter((l) => l.isToday);
@@ -1380,345 +1776,13 @@ app.use((req, _res, next) => {
   // ==========================================
   // Extra Classes Aggregator & Live Update APIs
   // ==========================================
-  const extraClassCache = new Map<string, { data: any; timestamp: number }>();
-  const EXTRA_CLASS_SPREADSHEET_ID = '1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4';
-
-  function parseDateToIso(rawDate: string, currentYearStr: string): string | null {
-    if (!rawDate) return null;
-    const str = String(rawDate).trim();
-    if (!str) return null;
-
-    // Check YYYY-MM-DD or YYYY/MM/DD
-    const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-    if (isoMatch) {
-      const y = isoMatch[1];
-      const m = isoMatch[2].padStart(2, '0');
-      const d = isoMatch[3].padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    }
-
-    // Check DD-MMM-YYYY or DD-MMM (e.g. 9-Sep-2026, 09-Sep-2026, 9-Sep, 10-Sept-2026)
-    const monthMap: Record<string, string> = {
-      jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-      jul: '07', aug: '08', sep: '09', sept: '09', oct: '10', nov: '11', dec: '12'
-    };
-    const mmmMatch = str.match(/^(\d{1,2})[-/\s]+([a-zA-Z]{3,4})[-/\s]*(\d{2,4})?$/);
-    if (mmmMatch) {
-      const d = mmmMatch[1].padStart(2, '0');
-      const monStr = mmmMatch[2].toLowerCase().substring(0, 3);
-      const m = monthMap[monStr] || monthMap[mmmMatch[2].toLowerCase()];
-      if (m) {
-        let y = mmmMatch[3];
-        if (!y) {
-          y = currentYearStr;
-        } else if (y.length === 2) {
-          y = `20${y}`;
-        }
-        return `${y}-${m}-${d}`;
-      }
-    }
-
-    // Check DD/MM/YYYY or DD-MM-YYYY
-    const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
-    if (dmyMatch) {
-      const d = dmyMatch[1].padStart(2, '0');
-      const m = dmyMatch[2].padStart(2, '0');
-      let y = dmyMatch[3];
-      if (y.length === 2) y = `20${y}`;
-      return `${y}-${m}-${d}`;
-    }
-
-    // Check Excel serial number (e.g. 46274)
-    const num = Number(str);
-    if (!isNaN(num) && num > 40000 && num < 60000) {
-      const epoch = new Date(Date.UTC(1899, 11, 30));
-      const target = new Date(epoch.getTime() + num * 86400000);
-      const y = target.getUTCFullYear();
-      const m = String(target.getUTCMonth() + 1).padStart(2, '0');
-      const d = String(target.getUTCDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    }
-
-    const parsed = new Date(str);
-    if (!isNaN(parsed.getTime())) {
-      const y = parsed.getFullYear();
-      const m = String(parsed.getMonth() + 1).padStart(2, '0');
-      const d = String(parsed.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    }
-
-    return null;
-  }
-
   app.get("/api/extra-classes/schedule", async (req, res) => {
     try {
       const forceRefresh = req.query.refresh === 'true';
-      const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
-      const cached = extraClassCache.get(cacheKey);
-
-      if (!forceRefresh && cached && Date.now() - cached.timestamp < 2 * 60 * 1000) {
-        return res.json(cached.data);
-      }
-
       const auth = getGoogleAuth(req);
       const sheets = google.sheets({ version: "v4", auth });
-
-      // 1. Get metadata of all sheets / tabs in the Extra Class workbook
-      const metaRes = await sheets.spreadsheets.get({
-        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-      });
-      const allSheets = metaRes.data.sheets || [];
-
-      // Tabs to ignore (not center lecture schedules)
-      const IGNORED_TABS = ['reference', 'sohel', 'osmanabad', 'instructions', 'readme', 'template'];
-      const centerSheets = allSheets.filter(s => {
-        const title = (s.properties?.title || '').trim();
-        if (!title) return false;
-        const lower = title.toLowerCase();
-        return !IGNORED_TABS.some(ign => lower.includes(ign));
-      });
-
-      // 2. Concurrently fetch rows from all center sheets
-      const sheetResults = await Promise.all(
-        centerSheets.map(async (sheet) => {
-          const sheetTitle = sheet.properties?.title || '';
-          try {
-            const valuesRes = await sheets.spreadsheets.values.get({
-              spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-              range: `'${sheetTitle}'!A1:N`,
-            });
-            return {
-              sheetTitle,
-              rows: valuesRes.data.values || [],
-            };
-          } catch (e: any) {
-            console.warn(`[Extra Class] Failed to fetch tab '${sheetTitle}':`, e.message);
-            return { sheetTitle, rows: [] };
-          }
-        })
-      );
-
-      // 3. Compute IST reference dates
-      const now = new Date();
-      const todayIstParts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kolkata",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(now); // "YYYY-MM-DD" e.g. "2026-09-09"
-
-      const tomorrowDateObj = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      const tomorrowIstParts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kolkata",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(tomorrowDateObj); // "YYYY-MM-DD" e.g. "2026-09-10"
-
-      const currentYearStr = todayIstParts.split('-')[0];
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-      const formatIsoDisplay = (iso: string) => {
-        const [y, m, d] = iso.split('-');
-        return `${d}-${monthNames[parseInt(m, 10) - 1]}-${y}`;
-      };
-
-      const todayDisplay = formatIsoDisplay(todayIstParts);
-      const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
-
-      const allLectures: any[] = [];
-      const centersFound = new Set<string>();
-
-      // 4. Process each sheet's rows
-      for (const { sheetTitle, rows } of sheetResults) {
-        if (!rows || rows.length === 0) continue;
-        centersFound.add(sheetTitle);
-
-        // Find header row in first 5 rows
-        let headerRowIdx = 0;
-        for (let i = 0; i < Math.min(rows.length, 5); i++) {
-          const nonEmpty = (rows[i] || []).filter((c: any) => String(c || '').trim() !== '');
-          if (nonEmpty.length >= 2) {
-            headerRowIdx = i;
-            break;
-          }
-        }
-
-        const headerRow = (rows[headerRowIdx] || []).map((h: any) => String(h || '').trim().toLowerCase());
-
-        let batchCol = 0;
-        let dayCol = 1;
-        let dateCol = 2;
-        let facultyCol = 3;
-        let inTimeCol = 4;
-        let outTimeCol = 5;
-        let classTypeCol = 6;
-        let teacherCol = 7;
-        let subjectCol = 8;
-        let bmCol = 9;
-        let announcementCol = 10;
-        let roomCol = 11;
-        let statusCol = 12;
-
-        headerRow.forEach((h: string, idx: number) => {
-          if (h.includes('batch')) batchCol = idx;
-          else if (h.includes('day')) dayCol = idx;
-          else if (h.includes('date')) dateCol = idx;
-          else if (h.includes('faculty') && !h.includes('name')) facultyCol = idx;
-          else if (h.includes('in time') || h.includes('start') || h === 'in') inTimeCol = idx;
-          else if (h.includes('out time') || h.includes('end') || h === 'out') outTimeCol = idx;
-          else if (h.includes('doubts') || h.includes('test') || h.includes('class type')) classTypeCol = idx;
-          else if (h.includes('teacher') || (h.includes('faculty') && h.includes('name'))) teacherCol = idx;
-          else if (h.includes('subject')) subjectCol = idx;
-          else if (h.includes('bm') || h.includes('manager')) bmCol = idx;
-          else if (h.includes('announcement') || h.includes('message')) announcementCol = idx;
-          else if (h.includes('room')) roomCol = idx;
-          else if (h.includes('status') || h.includes('done') || h.includes('announced') || h.includes('action')) statusCol = idx;
-        });
-
-        const statusColLetter = indexToColLetter(statusCol);
-
-        for (let r = headerRowIdx + 1; r < rows.length; r++) {
-          const row = rows[r] || [];
-          const batchRaw = String(row[batchCol] || '').trim();
-          if (!batchRaw) continue;
-
-          // Skip repeated header rows
-          if (batchRaw.toLowerCase().includes('batch') && batchRaw.toLowerCase().includes('code')) continue;
-
-          const day = String(row[dayCol] || '').trim();
-          const rawDate = String(row[dateCol] || '').trim();
-          const facultyCode = String(row[facultyCol] || '').trim();
-          const inTime = String(row[inTimeCol] || '').trim();
-          const outTime = String(row[outTimeCol] || '').trim();
-          const classType = String(row[classTypeCol] || '').trim();
-          const teacherName = String(row[teacherCol] || '').trim();
-          const subject = String(row[subjectCol] || '').trim();
-          const bmName = String(row[bmCol] || '').trim();
-          let announcement = String(row[announcementCol] || '').trim();
-          const room = String(row[roomCol] || '').trim();
-          const rawStatus = String(row[statusCol] || '').trim();
-
-          const statusLower = rawStatus.toLowerCase();
-          const isDone = ['done', 'announced', 'yes', 'ok', 'completed', 'true', 'checked', 'sent'].some(s => statusLower.includes(s));
-
-          const isoDate = parseDateToIso(rawDate, currentYearStr);
-          let displayDate = rawDate;
-          let isToday = false;
-          let isTomorrow = false;
-          let isPast = false;
-          let isUpcoming = false;
-
-          if (isoDate) {
-            displayDate = formatIsoDisplay(isoDate);
-            if (isoDate === todayIstParts) {
-              isToday = true;
-            } else if (isoDate === tomorrowIstParts) {
-              isTomorrow = true;
-            } else if (isoDate < todayIstParts) {
-              isPast = true;
-            } else {
-              isUpcoming = true;
-            }
-          } else {
-            const lowerDate = rawDate.toLowerCase();
-            if (lowerDate.includes('today')) isToday = true;
-            else if (lowerDate.includes('tomorrow')) isTomorrow = true;
-          }
-
-          // Generate student announcement text if empty in sheet
-          if (!announcement) {
-            announcement = `📢 *Extra Lecture Announcement*\n\n📌 *Batch:* ${batchRaw}\n📅 *Date & Day:* ${displayDate || rawDate} (${day || 'Scheduled'})\n⏰ *Time:* ${inTime || 'TBD'} - ${outTime || 'TBD'}\n📚 *Subject:* ${subject || 'Special Lecture'}\n👨‍🏫 *Faculty:* ${teacherName || facultyCode || 'Assigned Faculty'}\n🏢 *Room / Venue:* ${room || 'Assigned Room'}\n\n⚠️ *Mandatory for all enrolled students. Please report on time.*`;
-          }
-
-          const category = getCategory(batchRaw);
-          const phase = getPhase(batchRaw);
-          const timeSlot = getTimeSlot(batchRaw);
-
-          allLectures.push({
-            id: `${sheetTitle}_${r + 1}`,
-            spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-            sheetTitle,
-            center: sheetTitle,
-            rowIndex: r + 1,
-            statusColLetter,
-            batchCode: batchRaw,
-            formattedBatchName: batchRaw.toUpperCase().startsWith("VIDYAPEETH") || batchRaw.toUpperCase().startsWith("TUITION") || batchRaw.toUpperCase().startsWith("SIP")
-              ? batchRaw
-              : (batchRaw.toUpperCase().startsWith("T") ? `Tuition ${batchRaw}` : batchRaw.toUpperCase().startsWith("S") ? `SIP ${batchRaw}` : `Vidyapeeth ${batchRaw}`),
-            category,
-            phase,
-            timeSlot,
-            day,
-            rawDate,
-            isoDate,
-            displayDate,
-            facultyCode,
-            inTime,
-            outTime,
-            timeRange: inTime && outTime ? `${inTime} - ${outTime}` : inTime || outTime || 'Time TBA',
-            classType: classType || 'Extra Lecture',
-            teacherName,
-            subject,
-            bmName,
-            announcement,
-            room: room ? (room.toLowerCase().startsWith('room') ? room : `Room ${room}`) : 'Room TBA',
-            rawStatus,
-            isDone,
-            isToday,
-            isTomorrow,
-            isPast,
-            isUpcoming,
-          });
-        }
-      }
-
-      // Sort: Today first, then Tomorrow, then Upcoming; sorted by date and inTime
-      allLectures.sort((a, b) => {
-        // Priority weight: Today (1), Tomorrow (2), Upcoming (3), Past (4)
-        const getWeight = (item: any) => item.isToday ? 1 : item.isTomorrow ? 2 : item.isUpcoming ? 3 : 4;
-        const wA = getWeight(a);
-        const wB = getWeight(b);
-        if (wA !== wB) return wA - wB;
-
-        if (a.isoDate && b.isoDate && a.isoDate !== b.isoDate) {
-          return a.isoDate.localeCompare(b.isoDate);
-        }
-        return (a.inTime || '').localeCompare(b.inTime || '');
-      });
-
-      const todayCount = allLectures.filter(l => l.isToday).length;
-      const tomorrowCount = allLectures.filter(l => l.isTomorrow).length;
-      const upcomingCount = allLectures.filter(l => l.isUpcoming).length;
-      const pastCount = allLectures.filter(l => l.isPast).length;
-      const pendingCount = allLectures.filter(l => (l.isToday || l.isTomorrow) && !l.isDone).length;
-      const doneCount = allLectures.filter(l => (l.isToday || l.isTomorrow) && l.isDone).length;
-
-      const responsePayload = {
-        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-        todayDate: todayIstParts,
-        tomorrowDate: tomorrowIstParts,
-        todayDateDisplay: todayDisplay,
-        tomorrowDateDisplay: tomorrowDisplay,
-        centers: Array.from(centersFound),
-        classes: allLectures,
-        counts: {
-          today: todayCount,
-          tomorrow: tomorrowCount,
-          upcoming: upcomingCount,
-          past: pastCount,
-          pending: pendingCount,
-          done: doneCount,
-          total: allLectures.length,
-        }
-      };
-
-      extraClassCache.set(cacheKey, {
-        data: responsePayload,
-        timestamp: Date.now(),
-      });
-
-      res.json(responsePayload);
+      const payload = await fetchAllExtraClassLectures(sheets, forceRefresh);
+      res.json(payload);
     } catch (err: any) {
       console.error("API Error (/api/extra-classes/schedule):", err);
       res.status(500).json({ error: err.message || "Failed to aggregate extra classes." });
@@ -1847,14 +1911,17 @@ Keep the output clean, encouraging, professional, and under 400 words.`;
 
       if (openRouterKey.startsWith("sk-or-v1-")) {
         const candidateModels = [
-          "nvidia/nemotron-3.5-lightning:free",
-          "nex-agi/nex-n2.5-mini:free",
-          "google/gemma-4-26b-a4b-it:free",
+          "meta-llama/llama-3.3-70b-instruct:free",
+          "qwen/qwen-2.5-72b-instruct:free",
+          "mistralai/mistral-7b-instruct:free",
         ];
         for (const candidateModel of candidateModels) {
           try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
             const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
               method: "POST",
+              signal: controller.signal,
               headers: {
                 "Authorization": `Bearer ${openRouterKey}`,
                 "Content-Type": "application/json",
@@ -1866,6 +1933,7 @@ Keep the output clean, encouraging, professional, and under 400 words.`;
                 messages: [{ role: "user", content: prompt }]
               })
             });
+            clearTimeout(timeoutId);
             if (orRes.ok) {
               const data = await orRes.json();
               const text = data.choices?.[0]?.message?.content;
@@ -1873,6 +1941,9 @@ Keep the output clean, encouraging, professional, and under 400 words.`;
             }
           } catch {}
         }
+        // If OpenRouter calls timed out or failed, return fallback immediately!
+        // DO NOT call Google SDK with OpenRouter key!
+        return res.json({ explanation: fallbackText });
       }
 
       const response = await ai.models.generateContent({
@@ -1941,17 +2012,19 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
 
         // Try free fast OpenRouter models
         const candidateModels = [
-          "nvidia/nemotron-3.5-lightning:free",
-          "nex-agi/nex-n2.5-mini:free",
-          "google/gemma-4-26b-a4b-it:free",
-          "google/gemma-4-31b-it:free",
+          "meta-llama/llama-3.3-70b-instruct:free",
+          "qwen/qwen-2.5-72b-instruct:free",
+          "mistralai/mistral-7b-instruct:free",
         ];
 
         let openRouterReply = "";
         for (const candidateModel of candidateModels) {
           try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
             const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
               method: "POST",
+              signal: controller.signal,
               headers: {
                 "Authorization": `Bearer ${openRouterKey}`,
                 "Content-Type": "application/json",
@@ -1963,6 +2036,7 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
                 messages: openRouterMessages,
               })
             });
+            clearTimeout(timeoutId);
 
             if (orRes.ok) {
               const data = await orRes.json();
@@ -1976,6 +2050,10 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
 
         if (openRouterReply) {
           return res.json({ reply: openRouterReply });
+        } else {
+          return res.json({
+            reply: `(Offline AI Copilot) Here is a quick academic tip for **${contextBatch?.displayName || "this batch"}**:\n\n${scheduleText ? `📅 **Schedule Context:** ${scheduleText}\n\n` : ""}Ensure all lecture study materials, handouts, and DPP keys are uploaded to the corresponding subject drive folder to keep students aligned.`
+          });
         }
       }
 

@@ -1667,13 +1667,13 @@ export default function App() {
 
               {/* Panel Container (Fixed Sheet on Mobile, Sticky Column on Desktop) */}
               <motion.aside
-                initial={{ opacity: 0, y: 80 }}
+                initial={{ opacity: 0, y: '100%' }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 100 }}
-                transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-                className="fixed inset-x-0 bottom-0 z-50 max-h-[94vh] flex flex-col items-center justify-end p-0 sm:p-3 lg:p-0 lg:static lg:z-auto lg:inset-auto lg:max-h-[calc(100vh-120px)] lg:w-auto lg:sticky lg:top-[90px] flex-shrink-0 overscroll-contain"
+                exit={{ opacity: 0, y: '100%' }}
+                transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                className="fixed inset-x-0 bottom-0 z-50 max-h-[76vh] sm:max-h-[82vh] flex flex-col items-center justify-end p-0 sm:p-3 lg:p-0 lg:static lg:z-auto lg:inset-auto lg:max-h-[calc(100vh-120px)] lg:w-auto lg:sticky lg:top-[90px] flex-shrink-0 overscroll-contain"
               >
-                <div className="w-full sm:max-w-lg lg:max-w-none flex flex-col h-[90vh] sm:h-[84vh] lg:h-[780px]">
+                <div className="w-full sm:max-w-lg lg:max-w-none flex flex-col h-[74vh] sm:h-[80vh] lg:h-[780px]">
                   <AiCopilotPanel
                     batch={selectedAiBatch}
                     authToken={token}
