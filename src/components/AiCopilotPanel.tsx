@@ -201,7 +201,11 @@ export default function AiCopilotPanel({
 
       // 1. Fetch live schedule from /api/timetable/batch-schedule (searching across all workspaces)
       try {
-        const scheduleUrl = `/api/timetable/batch-schedule?searchAll=true&center=${encodeURIComponent(activeBatch.tabName || '')}&batchCode=${encodeURIComponent(activeBatch.fullName || activeBatch.displayName)}`;
+        // Keep a batch card inside its own workspace whenever possible. A
+        // free-text search still searches every timetable workbook.
+        const searchAll = activeBatch.tabName ? 'false' : 'true';
+        const requestedBatchCode = activeBatch.displayName || activeBatch.fullName;
+        const scheduleUrl = `/api/timetable/batch-schedule?searchAll=${searchAll}&center=${encodeURIComponent(activeBatch.tabName || '')}&batchCode=${encodeURIComponent(requestedBatchCode)}`;
         const headers: Record<string, string> = {};
         if (authToken) {
           headers['Authorization'] = `Bearer ${authToken}`;
@@ -439,7 +443,9 @@ export default function AiCopilotPanel({
     if (!activeBatch) return;
     setIsScheduleLoading(true);
     try {
-      const scheduleUrl = `/api/timetable/batch-schedule?searchAll=true&center=${encodeURIComponent(activeBatch.tabName || '')}&batchCode=${encodeURIComponent(activeBatch.fullName || activeBatch.displayName)}&forceRefresh=true`;
+      const searchAll = activeBatch.tabName ? 'false' : 'true';
+      const requestedBatchCode = activeBatch.displayName || activeBatch.fullName;
+      const scheduleUrl = `/api/timetable/batch-schedule?searchAll=${searchAll}&center=${encodeURIComponent(activeBatch.tabName || '')}&batchCode=${encodeURIComponent(requestedBatchCode)}&forceRefresh=true`;
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
       const res = await fetch(scheduleUrl, { headers });

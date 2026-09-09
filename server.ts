@@ -464,40 +464,31 @@ app.use((req, _res, next) => {
       }
     }
 
-    const headerRow = rows[headerRowIdx] || [];
-
-    let dayIdx = 0;           // Col A
-    let dateIdx = 1;          // Col B
-    let startIdx = 2;         // Col C
-    let endIdx = 3;           // Col D
-    let batchFacultyIdx = 4;  // Col E
-    let timeIdx = 7;          // Col H
-    let batchCodeIdx = 8;     // Col I
-    let facultyCodeIdx = 9;   // Col J
-    let subjectIdx = 34;      // Col AI (0-indexed 34 is 35th column)
-    let teacherEmailIdx = 36;  // Col AK (0-indexed 36 is 37th column)
-
-    // Current Week headers: check columns 0 to 15
-    for (let idx = 0; idx <= 15 && idx < headerRow.length; idx++) {
-      const val = headerRow[idx];
-      const h = (val || "").toString().trim().toLowerCase();
-      if (h === "day" || h.includes("day of week")) dayIdx = idx;
-      else if (h.includes("date") || h.includes("lecture date")) dateIdx = idx;
-      else if (h.includes("start time") || h === "start" || h.includes("in time")) startIdx = idx;
-      else if (h.includes("end time") || h === "end" || h.includes("out time")) endIdx = idx;
-      else if (h.includes("batch & faculty") || h.includes("faculty & batch") || h.includes("batch & fac") || h.includes("batch/fac")) batchFacultyIdx = idx;
-      else if (h === "time" || h === "time range") timeIdx = idx;
-      else if (h === "batch code" || h === "batch" || h === "batch name" || (h.includes("batch") && !h.includes("&") && !h.includes("faculty"))) batchCodeIdx = idx;
-      else if (h === "faculty code" || (h.includes("faculty") && !h.includes("&") && !h.includes("batch"))) facultyCodeIdx = idx;
-    }
-
-    // Subject and Teacher Email can be in Columns Y to AL (defaults: Col AI = 34, Col AK = 36)
-    for (let idx = 12; idx < headerRow.length; idx++) {
-      const val = headerRow[idx];
-      const h = (val || "").toString().trim().toLowerCase();
-      if (h.includes("subject")) subjectIdx = idx;
-      else if (h.includes("teacher email") || h.includes("faculty email") || h.includes("email") || h.includes("teacher")) teacherEmailIdx = idx;
-    }
+    /*
+     * Raw_DB contains two tables on the same row:
+     *
+     *   Current Week: A:J       Next Week: L:R
+     *
+     * Both tables repeat headers such as Day, Lecture Date, Start Time and End
+     * Time.  The previous header scan walked into the right-hand table and
+     * overwrote the left-hand indexes, while Batch Code still came from column
+     * I.  That mixed a current-week batch with next-week date/time data and
+     * caused false "today" cards.
+     *
+     * These are the published Raw_DB columns.  Keep them fixed so a label such
+     * as "Vidyapeeth 27-AJ251EA 2026" is matched to the exact row in column I
+     * and the lecture details always come from that same current-week row.
+     */
+    const dayIdx = 0;            // A: Day
+    const dateIdx = 1;           // B: Lecture Date
+    const startIdx = 2;          // C: Start Time
+    const endIdx = 3;            // D: End Time
+    const batchFacultyIdx = 4;   // E: Batch & Faculty
+    const timeIdx = 7;           // H: Time (display-only fallback)
+    const batchCodeIdx = 8;      // I: Batch Code
+    const facultyCodeIdx = 9;    // J: Faculty Code
+    const subjectIdx = 34;       // AI: Subject Name
+    const teacherEmailIdx = 36;  // AK: Teachers' Email
 
     const { dateStr: todayDate, dayStr: todayDay, now } = getIstDateInfo();
     const result: any[] = [];
@@ -531,7 +522,11 @@ app.use((req, _res, next) => {
       }
       const startTime = (row[startIdx] || "").toString().trim();
       const endTime = (row[endIdx] || "").toString().trim();
-      const timeRange = (row[timeIdx] || (startTime && endTime ? `${startTime} - ${endTime}` : "")).toString().trim();
+      // C and D are the authoritative source. H is retained only for legacy
+      // rows that do not have separately populated start/end times.
+      const timeRange = (startTime && endTime
+        ? `${startTime} - ${endTime}`
+        : (row[timeIdx] || "")).toString().trim();
       const facultyCode = (row[facultyCodeIdx] || "").toString().trim();
       let subject = (row[subjectIdx] || "").toString().trim();
       if (!subject || subject.toLowerCase() === "general" || subject.toLowerCase() === "lecture") {
@@ -539,15 +534,10 @@ app.use((req, _res, next) => {
         if (derived) subject = derived;
       }
       let teacherEmail = (row[teacherEmailIdx] || "").toString().trim();
-      if (!teacherEmail || !teacherEmail.includes("@")) {
-        for (let c = 10; c < Math.min(row.length, 45); c++) {
-          const val = (row[c] || "").toString().trim();
-          if (val.includes("@") && val.includes(".")) {
-            teacherEmail = val;
-            break;
-          }
-        }
-      }
+      // Do not search another arbitrary column for an email. Raw_DB's source
+      // of truth is AK; an empty/invalid AK should be shown as not listed,
+      // rather than displaying a different faculty member from the row.
+      if (!teacherEmail.includes("@")) teacherEmail = "";
 
       const isToday = isDateOrDayMatchingToday(lectureDate, day, todayDate, todayDay, now);
       const status = computeLectureStatus(startTime, endTime, isToday, now);

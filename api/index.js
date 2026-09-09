@@ -3775,35 +3775,16 @@ function parseRawDbRows(rows) {
       break;
     }
   }
-  const headerRow = rows[headerRowIdx] || [];
-  let dayIdx = 0;
-  let dateIdx = 1;
-  let startIdx = 2;
-  let endIdx = 3;
-  let batchFacultyIdx = 4;
-  let timeIdx = 7;
-  let batchCodeIdx = 8;
-  let facultyCodeIdx = 9;
-  let subjectIdx = 34;
-  let teacherEmailIdx = 36;
-  for (let idx = 0; idx <= 15 && idx < headerRow.length; idx++) {
-    const val = headerRow[idx];
-    const h = (val || "").toString().trim().toLowerCase();
-    if (h === "day" || h.includes("day of week")) dayIdx = idx;
-    else if (h.includes("date") || h.includes("lecture date")) dateIdx = idx;
-    else if (h.includes("start time") || h === "start" || h.includes("in time")) startIdx = idx;
-    else if (h.includes("end time") || h === "end" || h.includes("out time")) endIdx = idx;
-    else if (h.includes("batch & faculty") || h.includes("faculty & batch") || h.includes("batch & fac") || h.includes("batch/fac")) batchFacultyIdx = idx;
-    else if (h === "time" || h === "time range") timeIdx = idx;
-    else if (h === "batch code" || h === "batch" || h === "batch name" || h.includes("batch") && !h.includes("&") && !h.includes("faculty")) batchCodeIdx = idx;
-    else if (h === "faculty code" || h.includes("faculty") && !h.includes("&") && !h.includes("batch")) facultyCodeIdx = idx;
-  }
-  for (let idx = 12; idx < headerRow.length; idx++) {
-    const val = headerRow[idx];
-    const h = (val || "").toString().trim().toLowerCase();
-    if (h.includes("subject")) subjectIdx = idx;
-    else if (h.includes("teacher email") || h.includes("faculty email") || h.includes("email") || h.includes("teacher")) teacherEmailIdx = idx;
-  }
+  const dayIdx = 0;
+  const dateIdx = 1;
+  const startIdx = 2;
+  const endIdx = 3;
+  const batchFacultyIdx = 4;
+  const timeIdx = 7;
+  const batchCodeIdx = 8;
+  const facultyCodeIdx = 9;
+  const subjectIdx = 34;
+  const teacherEmailIdx = 36;
   const { dateStr: todayDate, dayStr: todayDay, now } = getIstDateInfo();
   const result = [];
   for (let i = headerRowIdx + 1; i < rows.length; i++) {
@@ -3833,7 +3814,7 @@ function parseRawDbRows(rows) {
     }
     const startTime = (row[startIdx] || "").toString().trim();
     const endTime = (row[endIdx] || "").toString().trim();
-    const timeRange = (row[timeIdx] || (startTime && endTime ? `${startTime} - ${endTime}` : "")).toString().trim();
+    const timeRange = (startTime && endTime ? `${startTime} - ${endTime}` : row[timeIdx] || "").toString().trim();
     const facultyCode = (row[facultyCodeIdx] || "").toString().trim();
     let subject = (row[subjectIdx] || "").toString().trim();
     if (!subject || subject.toLowerCase() === "general" || subject.toLowerCase() === "lecture") {
@@ -3841,15 +3822,7 @@ function parseRawDbRows(rows) {
       if (derived) subject = derived;
     }
     let teacherEmail = (row[teacherEmailIdx] || "").toString().trim();
-    if (!teacherEmail || !teacherEmail.includes("@")) {
-      for (let c = 10; c < Math.min(row.length, 45); c++) {
-        const val = (row[c] || "").toString().trim();
-        if (val.includes("@") && val.includes(".")) {
-          teacherEmail = val;
-          break;
-        }
-      }
-    }
+    if (!teacherEmail.includes("@")) teacherEmail = "";
     const isToday = isDateOrDayMatchingToday(lectureDate, day, todayDate, todayDay, now);
     const status = computeLectureStatus(startTime, endTime, isToday, now);
     const teacherName = getTeacherNameFromEmail(teacherEmail);
