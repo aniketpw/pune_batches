@@ -144,6 +144,7 @@ export interface ExtraLectureItem {
   isTomorrow: boolean;
   isPast: boolean;
   isUpcoming: boolean;
+  adminUrl?: string;
 }
 
 export interface ExtraClassScheduleResponse {
@@ -177,6 +178,7 @@ export interface AuditRecord {
   hasError: boolean;
   rowIndex: number;
   rawRow: Record<string, string>;
+  adminUrl?: string;
 }
 
 export interface AuditSheetResponse {

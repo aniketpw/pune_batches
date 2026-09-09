@@ -23,18 +23,67 @@ import {
   Eye,
   EyeOff
 } from 'lucide-react';
-import { ExtraClassScheduleResponse, ExtraLectureItem } from '../types';
+import { ExtraClassScheduleResponse, ExtraLectureItem, Batch } from '../types';
 
 interface ExtraClassViewProps {
   authToken?: string | null;
+  allBatches?: Batch[];
   onBackToBatches: () => void;
 }
 
 type DateScopeFilter = 'TODAY_TOMORROW' | 'TODAY_ONLY' | 'TOMORROW_ONLY' | 'ALL_UPCOMING' | 'HISTORY' | 'ALL';
 type StatusFilter = 'ALL' | 'PENDING' | 'DONE';
 
+// Finds PW Admin portal link for a batch code from allBatches
+export function findBatchAdminUrl(batchCode: string, allBatches: Batch[] = []): string | undefined {
+  if (!batchCode || !allBatches || allBatches.length === 0) return undefined;
+
+  const raw = batchCode.trim().toUpperCase();
+  const cleanCode = raw.replace(/[^A-Z0-9]/g, '');
+  const coreCode = raw
+    .replace(/^T?27[-_\s]*/i, '')
+    .replace(/\s*20\d{2}\s*$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+  // 1. Direct match on cleanCode
+  for (const b of allBatches) {
+    if (!b.adminUrl) continue;
+    const bDisplayClean = (b.displayName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const bFullClean = (b.fullName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    if (bDisplayClean === cleanCode || bFullClean === cleanCode) {
+      return b.adminUrl;
+    }
+  }
+
+  // 2. Core code match (e.g. AN151MA)
+  if (coreCode.length >= 4) {
+    for (const b of allBatches) {
+      if (!b.adminUrl) continue;
+      const bDisplayClean = (b.displayName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const bFullClean = (b.fullName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+      if (bDisplayClean.includes(coreCode) || bFullClean.includes(coreCode)) {
+        return b.adminUrl;
+      }
+    }
+  }
+
+  // 3. Substring match
+  for (const b of allBatches) {
+    if (!b.adminUrl) continue;
+    const bRaw = (b.displayName || b.fullName || '').toUpperCase();
+    if (bRaw.includes(raw) || raw.includes(bRaw)) {
+      return b.adminUrl;
+    }
+  }
+
+  return undefined;
+}
+
 export default function ExtraClassView({
   authToken,
+  allBatches = [],
   onBackToBatches,
 }: ExtraClassViewProps) {
   const [data, setData] = useState<ExtraClassScheduleResponse | null>(null);
@@ -60,7 +109,27 @@ export default function ExtraClassView({
     }, 3000);
   };
 
+  const EXTRA_CLASSES_STORAGE_KEY = 'pb_extra_classes_cache_v1';
+  const CLIENT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes client cache
+
   const fetchSchedule = async (forceRefresh = false) => {
+    // 1. Check client-side sessionStorage cache first if not explicitly refreshing
+    if (!forceRefresh) {
+      try {
+        const cachedStr = sessionStorage.getItem(EXTRA_CLASSES_STORAGE_KEY);
+        if (cachedStr) {
+          const cachedObj = JSON.parse(cachedStr);
+          if (cachedObj && cachedObj.data && (Date.now() - (cachedObj.timestamp || 0) < CLIENT_CACHE_TTL_MS)) {
+            setData(cachedObj.data);
+            setIsLoading(false);
+            return;
+          }
+        }
+      } catch (e) {
+        // ignore sessionStorage parsing errors
+      }
+    }
+
     setIsLoading(true);
     setError(null);
     try {
@@ -81,8 +150,30 @@ export default function ExtraClassView({
 
       const json: ExtraClassScheduleResponse = await res.json();
       setData(json);
+
+      // Save to client cache
+      try {
+        sessionStorage.setItem(EXTRA_CLASSES_STORAGE_KEY, JSON.stringify({
+          data: json,
+          timestamp: Date.now(),
+        }));
+      } catch (e) {}
     } catch (err: any) {
       console.error('Error fetching extra class schedule:', err);
+
+      // If we already have cached data in sessionStorage, fallback to it gracefully instead of error screen
+      try {
+        const cachedStr = sessionStorage.getItem(EXTRA_CLASSES_STORAGE_KEY);
+        if (cachedStr) {
+          const cachedObj = JSON.parse(cachedStr);
+          if (cachedObj && cachedObj.data) {
+            setData(cachedObj.data);
+            showToast('Loaded cached extra classes (Google Sheets limit active)');
+            return;
+          }
+        }
+      } catch (e) {}
+
       setError(err.message || 'Could not load extra class schedule. Please ensure you are logged in.');
     } finally {
       setIsLoading(false);
@@ -120,7 +211,7 @@ export default function ExtraClassView({
         (c) => (c.isToday || c.isTomorrow) && c.isDone
       ).length;
 
-      return {
+      const newPayload = {
         ...prev,
         classes: updatedClasses,
         counts: {
@@ -129,6 +220,16 @@ export default function ExtraClassView({
           done: doneCount,
         },
       };
+
+      // Also sync optimistic update with client storage
+      try {
+        sessionStorage.setItem(EXTRA_CLASSES_STORAGE_KEY, JSON.stringify({
+          data: newPayload,
+          timestamp: Date.now(),
+        }));
+      } catch (e) {}
+
+      return newPayload;
     });
 
     try {
@@ -199,50 +300,72 @@ export default function ExtraClassView({
     showToast(`Opening WhatsApp for ${item.batchCode}`);
   };
 
+  // Fast batch code to Admin URL lookup map
+  const adminUrlMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!allBatches || allBatches.length === 0) return map;
+
+    (data?.classes || []).forEach((item) => {
+      if (!map.has(item.batchCode)) {
+        const url = findBatchAdminUrl(item.batchCode, allBatches) || findBatchAdminUrl(item.formattedBatchName, allBatches);
+        if (url) map.set(item.batchCode, url);
+      }
+    });
+    return map;
+  }, [allBatches, data]);
+
   // Filtered lectures list
   const filteredLectures = useMemo(() => {
     if (!data || !data.classes) return [];
 
-    return data.classes.filter((item) => {
-      // 1. Date Scope Filter
-      if (dateScope === 'TODAY_TOMORROW') {
-        if (!item.isToday && !item.isTomorrow) return false;
-      } else if (dateScope === 'TODAY_ONLY') {
-        if (!item.isToday) return false;
-      } else if (dateScope === 'TOMORROW_ONLY') {
-        if (!item.isTomorrow) return false;
-      } else if (dateScope === 'ALL_UPCOMING') {
-        if (item.isPast) return false;
-      } else if (dateScope === 'HISTORY') {
-        if (!item.isPast) return false;
-      }
+    return data.classes
+      .map((item) => {
+        const adminUrl = adminUrlMap.get(item.batchCode) || findBatchAdminUrl(item.batchCode, allBatches) || findBatchAdminUrl(item.formattedBatchName, allBatches);
+        return {
+          ...item,
+          adminUrl,
+        };
+      })
+      .filter((item) => {
+        // 1. Date Scope Filter
+        if (dateScope === 'TODAY_TOMORROW') {
+          if (!item.isToday && !item.isTomorrow) return false;
+        } else if (dateScope === 'TODAY_ONLY') {
+          if (!item.isToday) return false;
+        } else if (dateScope === 'TOMORROW_ONLY') {
+          if (!item.isTomorrow) return false;
+        } else if (dateScope === 'ALL_UPCOMING') {
+          if (item.isPast) return false;
+        } else if (dateScope === 'HISTORY') {
+          if (!item.isPast) return false;
+        }
 
-      // 2. Status Filter
-      if (statusFilter === 'PENDING' && item.isDone) return false;
-      if (statusFilter === 'DONE' && !item.isDone) return false;
+        // 2. Status Filter
+        if (statusFilter === 'PENDING' && item.isDone) return false;
+        if (statusFilter === 'DONE' && !item.isDone) return false;
 
-      // 3. Center Filter
-      if (selectedCenter !== 'ALL' && item.center !== selectedCenter) return false;
+        // 3. Center Filter
+        if (selectedCenter !== 'ALL' && item.center !== selectedCenter) return false;
 
-      // 4. Search Filter
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase().trim();
-        const matches =
-          item.batchCode.toLowerCase().includes(query) ||
-          item.teacherName.toLowerCase().includes(query) ||
-          item.subject.toLowerCase().includes(query) ||
-          item.room.toLowerCase().includes(query) ||
-          item.facultyCode.toLowerCase().includes(query) ||
-          item.bmName.toLowerCase().includes(query) ||
-          item.center.toLowerCase().includes(query) ||
-          item.announcement.toLowerCase().includes(query);
+        // 4. Search Filter
+        if (searchQuery.trim()) {
+          const query = searchQuery.toLowerCase().trim();
+          const matches =
+            item.batchCode.toLowerCase().includes(query) ||
+            item.teacherName.toLowerCase().includes(query) ||
+            item.subject.toLowerCase().includes(query) ||
+            item.room.toLowerCase().includes(query) ||
+            item.facultyCode.toLowerCase().includes(query) ||
+            item.bmName.toLowerCase().includes(query) ||
+            item.center.toLowerCase().includes(query) ||
+            item.announcement.toLowerCase().includes(query);
 
-        if (!matches) return false;
-      }
+          if (!matches) return false;
+        }
 
-      return true;
-    });
-  }, [data, dateScope, statusFilter, selectedCenter, searchQuery]);
+        return true;
+      });
+  }, [data, dateScope, statusFilter, selectedCenter, searchQuery, adminUrlMap, allBatches]);
 
   // Center options
   const centerList = useMemo(() => {

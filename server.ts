@@ -189,7 +189,8 @@ app.use((req, _res, next) => {
     timestamp: number;
   }
   const rawDbCache = new Map<string, CachedRawDb>();
-  const RAW_DB_CACHE_TTL_MS = 5 * 60 * 1000;
+  const RAW_DB_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes TTL
+  const spreadsheetTitleCache = new Map<string, string>();
 
   async function fetchRawDbWithCache(
     sheets: any,
@@ -201,22 +202,33 @@ app.use((req, _res, next) => {
       return { title: cached.title, rows: cached.rows };
     }
 
-    const [metaRes, valuesRes] = await Promise.all([
-      sheets.spreadsheets.get({
-        spreadsheetId,
-        fields: "properties.title",
-      }).catch(() => ({ data: { properties: { title: spreadsheetId } } })),
-      sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: "'Raw_DB'!A1:AL1000",
-      }).catch((err: any) => {
-        console.warn(`Failed to fetch Raw_DB for ${spreadsheetId}:`, err.message);
-        return { data: { values: [] } };
-      }),
-    ]);
+    const knownTitle = cached?.title || spreadsheetTitleCache.get(spreadsheetId);
+    const metaPromise = knownTitle
+      ? Promise.resolve({ data: { properties: { title: knownTitle } } })
+      : sheets.spreadsheets.get({
+          spreadsheetId,
+          fields: "properties.title",
+        }).catch(() => ({ data: { properties: { title: spreadsheetId } } }));
 
-    const title = metaRes.data?.properties?.title || spreadsheetId;
-    const rows = valuesRes.data?.values || [];
+    const valuesPromise = sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "'Raw_DB'!A1:AL1000",
+    }).catch((err: any) => {
+      console.warn(`Failed to fetch Raw_DB for ${spreadsheetId}:`, err.message);
+      if (cached && cached.rows && cached.rows.length > 0) {
+        console.log(`[Raw_DB] Returning cached rows for ${spreadsheetId} due to error/quota.`);
+        return { data: { values: cached.rows } };
+      }
+      return { data: { values: [] } };
+    });
+
+    const [metaRes, valuesRes] = await Promise.all([metaPromise, valuesPromise]);
+
+    const title = metaRes.data?.properties?.title || knownTitle || spreadsheetId;
+    if (title && !spreadsheetTitleCache.has(spreadsheetId)) {
+      spreadsheetTitleCache.set(spreadsheetId, title);
+    }
+    const rows = valuesRes.data?.values || (cached?.rows || []);
 
     rawDbCache.set(spreadsheetId, {
       spreadsheetId,
@@ -1006,6 +1018,11 @@ app.use((req, _res, next) => {
   // ==========================================
   const extraClassCache = new Map<string, { data: any; timestamp: number }>();
   const EXTRA_CLASS_SPREADSHEET_ID = '1f5HNSsjR_08dDDVvFoqrG40SaKdxhgbRnhD8cp7gY_4';
+  const EXTRA_CLASS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
+
+  let cachedCenterSheets: { rawSheetTitle: string; centerName: string }[] | null = null;
+  let cachedCenterSheetsTimestamp = 0;
+  const CENTER_SHEETS_CACHE_TTL = 60 * 60 * 1000; // 1 hour TTL for tab metadata
 
   function parseDateToIso(rawDate: string, currentYearStr: string): string | null {
     if (!rawDate) return null;
@@ -1078,15 +1095,9 @@ app.use((req, _res, next) => {
     const cacheKey = `extra-classes-${EXTRA_CLASS_SPREADSHEET_ID}`;
     const cached = extraClassCache.get(cacheKey);
 
-    if (!forceRefresh && cached && Date.now() - cached.timestamp < 2 * 60 * 1000) {
+    if (!forceRefresh && cached && Date.now() - cached.timestamp < EXTRA_CLASS_CACHE_TTL) {
       return cached.data;
     }
-
-    // 1. Get metadata of all sheets / tabs in the Extra Class workbook
-    const metaRes = await sheets.spreadsheets.get({
-      spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-    });
-    const allSheets = metaRes.data.sheets || [];
 
     // Allowed 7 Centers as specified by user:
     // Hadapsar, Viman Nagar, Kothrud, PCMC, FC Road, Osmanabad (Dharashiv - S-SIP), Pimple Saudagar
@@ -1112,36 +1123,75 @@ app.use((req, _res, next) => {
       return null;
     }
 
-    const centerSheets = allSheets
-      .map((s: any) => {
-        const rawTitle = (s.properties?.title || '').trim();
-        const centerName = matchAllowedCenter(rawTitle);
-        return {
-          rawSheetTitle: rawTitle,
-          centerName,
-        };
-      })
-      .filter((item: any) => item.centerName !== null);
+    // 1. Resolve sheet tabs for the 7 centers (use cached tabs if within 1 hour)
+    let centerSheets = cachedCenterSheets;
+    const isCenterSheetsValid = centerSheets && centerSheets.length > 0 && (Date.now() - cachedCenterSheetsTimestamp < CENTER_SHEETS_CACHE_TTL);
 
-    // 2. Concurrently fetch rows from the 7 center sheets (Columns A to P to include Col K & Col O)
-    const sheetResults = await Promise.all(
-      centerSheets.map(async ({ rawSheetTitle, centerName }: any) => {
-        try {
-          const valuesRes = await sheets.spreadsheets.values.get({
-            spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-            range: `'${rawSheetTitle}'!A1:P`,
-          });
-          return {
-            sheetTitle: rawSheetTitle,
-            centerName,
-            rows: valuesRes.data.values || [],
-          };
-        } catch (e: any) {
-          console.warn(`[Extra Class] Failed to fetch tab '${rawSheetTitle}':`, e.message);
-          return { sheetTitle: rawSheetTitle, centerName, rows: [] };
+    if (!isCenterSheetsValid) {
+      try {
+        const metaRes = await sheets.spreadsheets.get({
+          spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+        });
+        const allSheets = metaRes.data.sheets || [];
+        centerSheets = allSheets
+          .map((s: any) => {
+            const rawTitle = (s.properties?.title || '').trim();
+            const centerName = matchAllowedCenter(rawTitle);
+            return {
+              rawSheetTitle: rawTitle,
+              centerName,
+            };
+          })
+          .filter((item: any) => item.centerName !== null);
+
+        if (centerSheets && centerSheets.length > 0) {
+          cachedCenterSheets = centerSheets;
+          cachedCenterSheetsTimestamp = Date.now();
         }
-      })
-    );
+      } catch (metaErr: any) {
+        console.warn('[Extra Class] Metadata fetch warning:', metaErr.message);
+        if (cached && cached.data) {
+          console.log('[Extra Class] Serving cached data due to metadata fetch error / quota.');
+          return cached.data;
+        }
+        if (!centerSheets || centerSheets.length === 0) {
+          centerSheets = [
+            { rawSheetTitle: 'Hadapsar', centerName: 'Hadapsar' },
+            { rawSheetTitle: 'Viman Nagar', centerName: 'Viman Nagar' },
+            { rawSheetTitle: 'Kothrud', centerName: 'Kothrud' },
+            { rawSheetTitle: 'PCMC', centerName: 'PCMC' },
+            { rawSheetTitle: 'FC Road', centerName: 'FC Road' },
+            { rawSheetTitle: 'Osmanabad', centerName: 'Osmanabad (Dharashiv - S-SIP)' },
+            { rawSheetTitle: 'Pimple Saudagar', centerName: 'Pimple Saudagar' },
+          ];
+        }
+      }
+    }
+
+    // 2. Fetch rows from the 7 center sheets in ONE SINGLE batchGet call!
+    const ranges = (centerSheets || []).map((s: any) => `'${s.rawSheetTitle}'!A1:P`);
+    let valueRanges: any[] = [];
+    try {
+      const batchRes = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
+        ranges,
+      });
+      valueRanges = batchRes.data?.valueRanges || [];
+    } catch (batchErr: any) {
+      console.warn('[Extra Class] batchGet error:', batchErr.message);
+      // If we hit Google Sheets API quota limit (429 / RESOURCE_EXHAUSTED) and have cached data:
+      if (cached && cached.data) {
+        console.log('[Extra Class] Serving stale cached data due to rate limit / quota exceeded.');
+        return cached.data;
+      }
+      throw batchErr;
+    }
+
+    const sheetResults = (centerSheets || []).map((s: any, idx: number) => ({
+      sheetTitle: s.rawSheetTitle,
+      centerName: s.centerName,
+      rows: valueRanges[idx]?.values || [],
+    }));
 
     // 3. Compute IST reference dates
     const now = new Date();
@@ -1894,8 +1944,25 @@ app.use((req, _res, next) => {
         },
       });
 
-      // Clear extra class cache so next fetch gets fresh status
-      extraClassCache.clear();
+      // Update extra class in-memory cache directly without clearing, avoiding rate-limit hits
+      const cacheKey = `extra-classes-${targetSheetId}`;
+      const cached = extraClassCache.get(cacheKey);
+      if (cached && cached.data && Array.isArray(cached.data.classes)) {
+        const isDone = newStatus.toLowerCase().includes("done");
+        for (const cls of cached.data.classes) {
+          if (cls.sheetTitle === sheetTitle && Number(cls.rowIndex) === Number(rowIndex)) {
+            cls.rawStatus = newStatus;
+            cls.isDone = isDone;
+            break;
+          }
+        }
+        cached.data.counts = {
+          ...cached.data.counts,
+          done: cached.data.classes.filter((c: any) => c.isDone).length,
+          pending: cached.data.classes.filter((c: any) => !c.isDone).length,
+        };
+        cached.timestamp = Date.now();
+      }
 
       res.json({
         success: true,
@@ -1957,6 +2024,90 @@ app.use((req, _res, next) => {
     if (lower.includes("kothrud") || lower.includes("kothurd")) return "KOTHRUD";
     if (lower.includes("tc") || lower.includes("tuition")) return "TC";
     return b || "Pune Center";
+  }
+
+  function formatAuditDateTime(val: string): string {
+    if (!val) return "";
+    const s = String(val).trim();
+    if (!s) return "";
+
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    // Pattern 1: YYYY-MM-DD HH:mm(:ss)? or YYYY/MM/DD
+    const isoMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (isoMatch) {
+      const year = isoMatch[1];
+      const month = parseInt(isoMatch[2], 10) - 1;
+      const day = parseInt(isoMatch[3], 10);
+      const monthStr = monthNames[month] || String(month + 1);
+      const dayStr = day < 10 ? `0${day}` : `${day}`;
+
+      if (isoMatch[4] !== undefined && isoMatch[5] !== undefined) {
+        let hour = parseInt(isoMatch[4], 10);
+        const min = isoMatch[5];
+        const ampm = hour >= 12 ? "PM" : "AM";
+        hour = hour % 12;
+        if (hour === 0) hour = 12;
+        const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+        return `${dayStr}-${monthStr}-${year} • ${hourStr}:${min} ${ampm}`;
+      }
+      return `${dayStr}-${monthStr}-${year}`;
+    }
+
+    // Pattern 2: DD-MM-YYYY or DD/MM/YYYY
+    const ddmmyyyyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (ddmmyyyyMatch) {
+      const day = parseInt(ddmmyyyyMatch[1], 10);
+      const month = parseInt(ddmmyyyyMatch[2], 10) - 1;
+      const year = ddmmyyyyMatch[3];
+      const monthStr = monthNames[month] || String(month + 1);
+      const dayStr = day < 10 ? `0${day}` : `${day}`;
+
+      if (ddmmyyyyMatch[4] !== undefined && ddmmyyyyMatch[5] !== undefined) {
+        let hour = parseInt(ddmmyyyyMatch[4], 10);
+        const min = ddmmyyyyMatch[5];
+        const ampm = hour >= 12 ? "PM" : "AM";
+        hour = hour % 12;
+        if (hour === 0) hour = 12;
+        const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+        return `${dayStr}-${monthStr}-${year} • ${hourStr}:${min} ${ampm}`;
+      }
+      return `${dayStr}-${monthStr}-${year}`;
+    }
+
+    // Pattern 3: Pure time like 17:10 or 17:10:00
+    const timeMatch = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (timeMatch) {
+      let hour = parseInt(timeMatch[1], 10);
+      const min = timeMatch[2];
+      const ampm = hour >= 12 ? "PM" : "AM";
+      hour = hour % 12;
+      if (hour === 0) hour = 12;
+      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+      return `${hourStr}:${min} ${ampm}`;
+    }
+
+    return s;
+  }
+
+  function isTrivialAuditClean(val: string): boolean {
+    if (!val) return true;
+    const lower = val.toLowerCase().trim();
+    const cleanKeywords = [
+      "no", "none", "nil", "ok", "clean", "done", "na", "n/a", "-", "--", "false", "true",
+      "no issue", "no issues", "no error", "no errors", "all ok", "good", "resolved", "completed", "yes", "none reported"
+    ];
+    return cleanKeywords.includes(lower);
+  }
+
+  function isExplicitAuditIssue(val: string): boolean {
+    if (!val || isTrivialAuditClean(val)) return false;
+    const lower = val.toLowerCase();
+    const problemKeywords = [
+      "wrong", "issue", "error", "not uploaded", "missing", "delay", "fault",
+      "problem", "incorrect", "pendency", "pending", "failed", "reschedule", "cancel", "mismatch", "defect", "quiz"
+    ];
+    return problemKeywords.some((kw) => lower.includes(kw));
   }
 
   app.get("/api/audit-sheet", async (req, res) => {
@@ -2029,28 +2180,79 @@ app.use((req, _res, next) => {
         }
 
         const headerRow = (rows[headerRowIndex] || []).map((h: any) => String(h || "").trim());
-        const headersLower = headerRow.map((h: string) => h.toLowerCase().replace(/[^a-z0-9]/g, " "));
 
         let branchIdx = -1;
         let batchIdx = -1;
         let subjectIdx = -1;
         let timeIdx = -1;
         let bmIdx = -1;
-        let errorIdx = -1;
+        const issueColIndices: number[] = [];
+        const statusColIndices: number[] = [];
 
-        headersLower.forEach((h: string, idx: number) => {
-          if (branchIdx === -1 && (h.includes("branch") || h.includes("center") || h.includes("centre") || h.includes("location"))) {
+        headerRow.forEach((colHeader: string, idx: number) => {
+          const rawH = colHeader.toLowerCase().trim();
+          const hAlpha = rawH.replace(/[^a-z0-9]/g, "");
+          const hSpaced = rawH.replace(/[^a-z0-9]/g, " ");
+
+          // 1. Branch / Center
+          if (branchIdx === -1 && (hAlpha.includes("branch") || hAlpha.includes("center") || hAlpha.includes("centre") || hAlpha.includes("location"))) {
             branchIdx = idx;
-          } else if (batchIdx === -1 && (h.includes("batch name") || h.includes("batch_name") || h.includes("batch code") || (h.includes("batch") && !h.includes("manager")))) {
+          } 
+          // 2. Batch Name
+          else if (batchIdx === -1 && (hAlpha.includes("batchname") || hAlpha.includes("batchcode") || (hAlpha.includes("batch") && !hAlpha.includes("manager") && !hAlpha.includes("bm")))) {
             batchIdx = idx;
-          } else if (subjectIdx === -1 && (h.includes("subject name") || h.includes("subject_name") || h.includes("subject") || h === "sub")) {
+          } 
+          // 3. Subject Name
+          else if (subjectIdx === -1 && (hAlpha.includes("subjectname") || hAlpha.includes("subject") || hAlpha === "sub")) {
             subjectIdx = idx;
-          } else if (timeIdx === -1 && (h.includes("lec start time") || h.includes("lec_start") || h.includes("start time") || h.includes("lecture time") || h.includes("in time") || h === "time" || h.includes("slot"))) {
+          } 
+          // 4. Lecture Start Time (user format: "lec_starttime", "lec start time", "start time", etc.)
+          else if (timeIdx === -1 && (
+            hAlpha.includes("lecstart") ||
+            hAlpha.includes("starttime") ||
+            hAlpha.includes("lectime") ||
+            hAlpha.includes("startdate") ||
+            hAlpha.includes("lecdate") ||
+            hSpaced.includes("lec start") ||
+            hSpaced.includes("start time") ||
+            hSpaced.includes("lecture time") ||
+            hSpaced.includes("in time") ||
+            hAlpha === "time" ||
+            hAlpha === "timing" ||
+            hAlpha.includes("slot")
+          )) {
             timeIdx = idx;
-          } else if (bmIdx === -1 && (h.includes("final bm") || h.includes("final_bm") || h.includes("batch manager") || h === "bm" || h.includes("bm name") || h.includes("manager"))) {
+          } 
+          // 5. Final BM
+          else if (bmIdx === -1 && (
+            hAlpha.includes("finalbm") ||
+            hAlpha.includes("batchmanager") ||
+            hAlpha === "bm" ||
+            hAlpha.includes("bmname") ||
+            (hAlpha.includes("manager") && !hAlpha.includes("batch"))
+          )) {
             bmIdx = idx;
-          } else if (errorIdx === -1 && (h.includes("error") || h.includes("errors") || h.includes("remarks") || h.includes("issue") || h.includes("pendency") || h.includes("status"))) {
-            errorIdx = idx;
+          }
+
+          // 6. Issue / Error / Remarks columns (e.g. Issue, Quiz Issue, Remarks, Pendency, Problem, etc.)
+          if (
+            hAlpha.includes("issue") ||
+            hAlpha.includes("error") ||
+            hAlpha.includes("remark") ||
+            hAlpha.includes("wrong") ||
+            hAlpha.includes("quiz") ||
+            hAlpha.includes("pendency") ||
+            hAlpha.includes("problem") ||
+            hAlpha.includes("reason") ||
+            hAlpha.includes("comment") ||
+            hAlpha.includes("note") ||
+            hAlpha.includes("defect") ||
+            hAlpha.includes("fault") ||
+            hAlpha.includes("audit")
+          ) {
+            issueColIndices.push(idx);
+          } else if (hAlpha.includes("status")) {
+            statusColIndices.push(idx);
           }
         });
 
@@ -2103,10 +2305,46 @@ app.use((req, _res, next) => {
 
           const rawSubject = subjectIdx >= 0 ? String(row[subjectIdx] || "").trim() : "";
           const rawTime = timeIdx >= 0 ? String(row[timeIdx] || "").trim() : "";
+          const formattedLecTime = formatAuditDateTime(rawTime);
           const rawBm = bmIdx >= 0 ? String(row[bmIdx] || "").trim() : "";
-          const rawError = errorIdx >= 0 ? String(row[errorIdx] || "").trim() : "";
 
-          const hasError = !!rawError && !["no", "none", "nil", "ok", "clean", "done", "na", "n/a", "-", "false", "true"].includes(rawError.toLowerCase());
+          // Collect all non-empty issue & remarks texts across candidate columns
+          const gatheredIssues: string[] = [];
+          for (const idx of issueColIndices) {
+            const val = String(row[idx] || "").trim();
+            if (val && !isTrivialAuditClean(val)) {
+              if (!gatheredIssues.some((g) => g.toLowerCase() === val.toLowerCase())) {
+                gatheredIssues.push(val);
+              }
+            }
+          }
+
+          // If no issues found from primary issue columns, check status columns
+          if (gatheredIssues.length === 0) {
+            for (const idx of statusColIndices) {
+              const val = String(row[idx] || "").trim();
+              if (val && !isTrivialAuditClean(val)) {
+                if (!gatheredIssues.some((g) => g.toLowerCase() === val.toLowerCase())) {
+                  gatheredIssues.push(val);
+                }
+              }
+            }
+          }
+
+          // Fallback scan across all other columns for explicit error keywords (e.g. "Wrong Quiz attached")
+          if (gatheredIssues.length === 0) {
+            for (let c = 0; c < row.length; c++) {
+              if (c === branchIdx || c === batchIdx || c === subjectIdx || c === timeIdx || c === bmIdx) continue;
+              const cellVal = String(row[c] || "").trim();
+              if (cellVal && isExplicitAuditIssue(cellVal)) {
+                gatheredIssues.push(cellVal);
+                break;
+              }
+            }
+          }
+
+          const rawError = gatheredIssues.join(" • ");
+          const hasError = gatheredIssues.length > 0;
 
           // Build rawRow dictionary of all original columns
           const rawRowObj: Record<string, string> = {};
@@ -2121,7 +2359,7 @@ app.use((req, _res, next) => {
             branch: normalizedBranch,
             batchName: finalBatchName,
             subjectName: rawSubject,
-            lecStartTime: rawTime,
+            lecStartTime: formattedLecTime || rawTime,
             finalBm: rawBm,
             errors: rawError,
             hasError,

@@ -1730,6 +1730,7 @@ export default function App() {
         <div className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:px-8 xl:px-12">
           <ExtraClassView
             authToken={token}
+            allBatches={allBatches}
             onBackToBatches={() => setActiveView('batches')}
           />
         </div>
@@ -1737,6 +1738,7 @@ export default function App() {
         <div className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:px-8 xl:px-12">
           <AuditSheetView
             authToken={token}
+            allBatches={allBatches}
             onBackToBatches={() => setActiveView('batches')}
           />
         </div>

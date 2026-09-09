@@ -23,10 +23,11 @@ import {
   ShieldAlert,
   Info
 } from 'lucide-react';
-import { AuditRecord, AuditSheetResponse } from '../types';
+import { AuditRecord, AuditSheetResponse, Batch } from '../types';
 
 interface AuditSheetViewProps {
   authToken?: string | null;
+  allBatches?: Batch[];
   onBackToBatches: () => void;
 }
 
@@ -49,8 +50,158 @@ function isPuneBatchCode(str: string): boolean {
   );
 }
 
+// Formats timestamps like "2026-08-20 17:10:00+00:00" into "20-Aug-2026 • 05:10 PM"
+export function formatAuditDateTime(val: string): string {
+  if (!val) return '';
+  const s = String(val).trim();
+  if (!s) return '';
+
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  const isoMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (isoMatch) {
+    const year = isoMatch[1];
+    const month = parseInt(isoMatch[2], 10) - 1;
+    const day = parseInt(isoMatch[3], 10);
+    const monthStr = monthNames[month] || String(month + 1);
+    const dayStr = day < 10 ? `0${day}` : `${day}`;
+
+    if (isoMatch[4] !== undefined && isoMatch[5] !== undefined) {
+      let hour = parseInt(isoMatch[4], 10);
+      const min = isoMatch[5];
+      const ampm = hour >= 12 ? 'PM' : 'AM';
+      hour = hour % 12;
+      if (hour === 0) hour = 12;
+      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+      return `${dayStr}-${monthStr}-${year} • ${hourStr}:${min} ${ampm}`;
+    }
+    return `${dayStr}-${monthStr}-${year}`;
+  }
+
+  const ddmmyyyyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (ddmmyyyyMatch) {
+    const day = parseInt(ddmmyyyyMatch[1], 10);
+    const month = parseInt(ddmmyyyyMatch[2], 10) - 1;
+    const year = ddmmyyyyMatch[3];
+    const monthStr = monthNames[month] || String(month + 1);
+    const dayStr = day < 10 ? `0${day}` : `${day}`;
+
+    if (ddmmyyyyMatch[4] !== undefined && ddmmyyyyMatch[5] !== undefined) {
+      let hour = parseInt(ddmmyyyyMatch[4], 10);
+      const min = ddmmyyyyMatch[5];
+      const ampm = hour >= 12 ? 'PM' : 'AM';
+      hour = hour % 12;
+      if (hour === 0) hour = 12;
+      const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+      return `${dayStr}-${monthStr}-${year} • ${hourStr}:${min} ${ampm}`;
+    }
+    return `${dayStr}-${monthStr}-${year}`;
+  }
+
+  const timeMatch = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (timeMatch) {
+    let hour = parseInt(timeMatch[1], 10);
+    const min = timeMatch[2];
+    const ampm = hour >= 12 ? 'PM' : 'AM';
+    hour = hour % 12;
+    if (hour === 0) hour = 12;
+    const hourStr = hour < 10 ? `0${hour}` : `${hour}`;
+    return `${hourStr}:${min} ${ampm}`;
+  }
+
+  return s;
+}
+
+// Finds PW Admin portal link for a batch code from allBatches
+export function findBatchAdminUrl(batchCode: string, allBatches: Batch[] = []): string | undefined {
+  if (!batchCode || !allBatches || allBatches.length === 0) return undefined;
+
+  const raw = batchCode.trim().toUpperCase();
+  const cleanCode = raw.replace(/[^A-Z0-9]/g, '');
+  const coreCode = raw
+    .replace(/^T?27[-_\s]*/i, '')
+    .replace(/\s*20\d{2}\s*$/i, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+  // 1. Direct match on cleanCode
+  for (const b of allBatches) {
+    if (!b.adminUrl) continue;
+    const bDisplayClean = (b.displayName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const bFullClean = (b.fullName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    if (bDisplayClean === cleanCode || bFullClean === cleanCode) {
+      return b.adminUrl;
+    }
+  }
+
+  // 2. Core code match (e.g. AN151MA)
+  if (coreCode.length >= 4) {
+    for (const b of allBatches) {
+      if (!b.adminUrl) continue;
+      const bDisplayClean = (b.displayName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const bFullClean = (b.fullName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+      if (bDisplayClean.includes(coreCode) || bFullClean.includes(coreCode)) {
+        return b.adminUrl;
+      }
+    }
+  }
+
+  // 3. Substring match
+  for (const b of allBatches) {
+    if (!b.adminUrl) continue;
+    const bRaw = (b.displayName || b.fullName || '').toUpperCase();
+    if (bRaw.includes(raw) || raw.includes(bRaw)) {
+      return b.adminUrl;
+    }
+  }
+
+  return undefined;
+}
+
+// Resolves actual errors, ensuring remarks like "Wrong Quiz attached" in rawRow are never missed
+export function getResolvedRecordErrors(rec: AuditRecord): { errors: string; hasError: boolean } {
+  if (rec.hasError && rec.errors) {
+    return { errors: rec.errors, hasError: true };
+  }
+
+  if (rec.rawRow) {
+    const gathered: string[] = [];
+    Object.entries(rec.rawRow).forEach(([key, val]) => {
+      const k = key.toLowerCase();
+      const v = String(val || '').trim();
+      if (!v) return;
+
+      const isClean = [
+        'no', 'none', 'nil', 'ok', 'clean', 'done', 'na', 'n/a', '-', '--', 'false', 'true',
+        'no issue', 'no issues', 'all ok', 'good', 'resolved', 'yes', 'none reported'
+      ].includes(v.toLowerCase());
+      if (isClean) return;
+
+      const isIssueCol =
+        k.includes('issue') || k.includes('error') || k.includes('remark') ||
+        k.includes('wrong') || k.includes('quiz') || k.includes('pendency') ||
+        k.includes('problem') || k.includes('reason');
+      const isIssueVal =
+        v.toLowerCase().includes('wrong') || v.toLowerCase().includes('issue') ||
+        v.toLowerCase().includes('error') || v.toLowerCase().includes('not uploaded');
+
+      if ((isIssueCol || isIssueVal) && !gathered.some((g) => g.toLowerCase() === v.toLowerCase())) {
+        gathered.push(v);
+      }
+    });
+
+    if (gathered.length > 0) {
+      return { errors: gathered.join(' • '), hasError: true };
+    }
+  }
+
+  return { errors: rec.errors || '', hasError: !!rec.hasError };
+}
+
 export default function AuditSheetView({
   authToken,
+  allBatches = [],
   onBackToBatches,
 }: AuditSheetViewProps) {
   const [data, setData] = useState<AuditSheetResponse | null>(null);
@@ -125,59 +276,86 @@ export default function AuditSheetView({
     return Array.from(set).sort();
   }, [data]);
 
+  // Fast batch code to Admin URL lookup map
+  const adminUrlMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!allBatches || allBatches.length === 0) return map;
+
+    (data?.records || []).forEach((rec) => {
+      if (!map.has(rec.batchName)) {
+        const url = findBatchAdminUrl(rec.batchName, allBatches);
+        if (url) map.set(rec.batchName, url);
+      }
+    });
+    return map;
+  }, [allBatches, data]);
+
   // Filtered records
   const filteredRecords = useMemo(() => {
     if (!data?.records) return [];
 
-    return data.records.filter((rec) => {
-      // 0. STRICT REQUIREMENT: Only batch codes containing/starting with "27-" or "T27"
-      if (!isPuneBatchCode(rec.batchName)) {
-        return false;
-      }
-
-      // 1. Subsheet Filter
-      if (selectedSubsheet !== 'ALL') {
-        const targetLower = selectedSubsheet.toLowerCase();
-        const recSheetLower = (rec.subsheet || '').toLowerCase();
-        if (!recSheetLower.includes(targetLower) && !targetLower.includes(recSheetLower)) {
+    return data.records
+      .map((rec) => {
+        const resolved = getResolvedRecordErrors(rec);
+        const resolvedTime = formatAuditDateTime(rec.lecStartTime);
+        const adminUrl = adminUrlMap.get(rec.batchName) || findBatchAdminUrl(rec.batchName, allBatches);
+        return {
+          ...rec,
+          errors: resolved.errors,
+          hasError: resolved.hasError,
+          lecStartTime: resolvedTime || rec.lecStartTime,
+          adminUrl,
+        };
+      })
+      .filter((rec) => {
+        // 0. STRICT REQUIREMENT: Only batch codes containing/starting with "27-" or "T27"
+        if (!isPuneBatchCode(rec.batchName)) {
           return false;
         }
-      }
 
-      // 2. Branch Filter
-      if (selectedBranch !== 'ALL') {
-        if (rec.branch !== selectedBranch && !(rec.branch || '').includes(selectedBranch)) {
-          return false;
+        // 1. Subsheet Filter
+        if (selectedSubsheet !== 'ALL') {
+          const targetLower = selectedSubsheet.toLowerCase();
+          const recSheetLower = (rec.subsheet || '').toLowerCase();
+          if (!recSheetLower.includes(targetLower) && !targetLower.includes(recSheetLower)) {
+            return false;
+          }
         }
-      }
 
-      // 3. Error Filter
-      if (errorFilter === 'ERRORS_ONLY' && !rec.hasError) return false;
-      if (errorFilter === 'CLEAN_ONLY' && rec.hasError) return false;
+        // 2. Branch Filter
+        if (selectedBranch !== 'ALL') {
+          if (rec.branch !== selectedBranch && !(rec.branch || '').includes(selectedBranch)) {
+            return false;
+          }
+        }
 
-      // 4. Search Query Filter
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase().trim();
-        const bName = (rec.batchName || '').toLowerCase();
-        const sName = (rec.subjectName || '').toLowerCase();
-        const bm = (rec.finalBm || '').toLowerCase();
-        const err = (rec.errors || '').toLowerCase();
-        const br = (rec.branch || '').toLowerCase();
-        const time = (rec.lecStartTime || '').toLowerCase();
+        // 3. Error Filter
+        if (errorFilter === 'ERRORS_ONLY' && !rec.hasError) return false;
+        if (errorFilter === 'CLEAN_ONLY' && rec.hasError) return false;
 
-        return (
-          bName.includes(q) ||
-          sName.includes(q) ||
-          bm.includes(q) ||
-          err.includes(q) ||
-          br.includes(q) ||
-          time.includes(q)
-        );
-      }
+        // 4. Search Query Filter
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase().trim();
+          const bName = (rec.batchName || '').toLowerCase();
+          const sName = (rec.subjectName || '').toLowerCase();
+          const bm = (rec.finalBm || '').toLowerCase();
+          const err = (rec.errors || '').toLowerCase();
+          const br = (rec.branch || '').toLowerCase();
+          const time = (rec.lecStartTime || '').toLowerCase();
 
-      return true;
-    });
-  }, [data, selectedSubsheet, selectedBranch, errorFilter, searchQuery]);
+          return (
+            bName.includes(q) ||
+            sName.includes(q) ||
+            bm.includes(q) ||
+            err.includes(q) ||
+            br.includes(q) ||
+            time.includes(q)
+          );
+        }
+
+        return true;
+      });
+  }, [data, selectedSubsheet, selectedBranch, errorFilter, searchQuery, adminUrlMap, allBatches]);
 
   // Statistics
   const stats = useMemo(() => {
@@ -613,9 +791,9 @@ export default function AuditSheetView({
             {/* Desktop Table Header */}
             <div className="hidden lg:grid grid-cols-12 gap-2 px-3 py-2 bg-slate-200 text-slate-700 text-[10px] font-black uppercase tracking-wider rounded-[2px]">
               <div className="col-span-2">Branch / Subsheet</div>
-              <div className="col-span-3">Batch Name</div>
-              <div className="col-span-2">Subject</div>
-              <div className="col-span-1">Start Time</div>
+              <div className="col-span-3">Batch & Admin</div>
+              <div className="col-span-1">Subject</div>
+              <div className="col-span-2">Lecture Time</div>
               <div className="col-span-2">Final BM</div>
               <div className="col-span-2">Errors / Remarks</div>
             </div>
@@ -642,14 +820,14 @@ export default function AuditSheetView({
                     </div>
                   </div>
 
-                  {/* Batch Name */}
-                  <div className="col-span-3 font-black text-slate-900 flex items-center gap-1.5">
+                  {/* Batch Name & Admin Button */}
+                  <div className="col-span-3 font-black text-slate-900 flex items-center gap-1.5 min-w-0">
                     <span className="truncate" title={rec.batchName}>
                       {rec.batchName}
                     </span>
                     <button
                       onClick={() => handleCopyText(rec.batchName, rec.id, 'Batch Name')}
-                      className="p-1 text-slate-400 hover:text-slate-800 cursor-pointer rounded-[2px]"
+                      className="p-1 text-slate-400 hover:text-slate-800 cursor-pointer rounded-[2px] flex-shrink-0"
                       title="Copy batch code"
                     >
                       {copiedId === rec.id ? (
@@ -658,12 +836,33 @@ export default function AuditSheetView({
                         <Copy className="w-3 h-3" />
                       )}
                     </button>
+                    {rec.adminUrl ? (
+                      <a
+                        href={rec.adminUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        referrerPolicy="no-referrer"
+                        className="px-2 py-0.5 bg-slate-900 hover:bg-black text-white text-[9.5px] font-black rounded-[2px] inline-flex items-center gap-1 uppercase tracking-wider transition-all shadow-xs active:scale-95 flex-shrink-0 cursor-pointer"
+                        title={`Open ${rec.batchName} in PW Admin Portal`}
+                      >
+                        <span>Admin</span>
+                        <ExternalLink className="w-2.5 h-2.5 opacity-90" />
+                      </a>
+                    ) : (
+                      <span
+                        className="px-1.5 py-0.5 bg-slate-100 text-slate-300 text-[9px] font-bold rounded-[2px] inline-flex items-center gap-0.5 uppercase tracking-wider flex-shrink-0"
+                        title="Admin link not available in batch registry"
+                      >
+                        <span>Admin</span>
+                        <ExternalLink className="w-2.5 h-2.5" />
+                      </span>
+                    )}
                   </div>
 
                   {/* Subject Name */}
-                  <div className="col-span-2">
+                  <div className="col-span-1">
                     {rec.subjectName ? (
-                      <span className={`inline-block px-2 py-0.5 rounded-[2px] text-[10px] font-black uppercase border ${getSubjectColor(rec.subjectName)}`}>
+                      <span className={`inline-block px-1.5 py-0.5 rounded-[2px] text-[9.5px] font-black uppercase border truncate max-w-full ${getSubjectColor(rec.subjectName)}`} title={rec.subjectName}>
                         {rec.subjectName}
                       </span>
                     ) : (
@@ -671,10 +870,10 @@ export default function AuditSheetView({
                     )}
                   </div>
 
-                  {/* Start Time */}
-                  <div className="col-span-1 font-mono text-slate-700 text-[11px] font-bold flex items-center gap-1">
-                    <Clock className="w-3 h-3 text-slate-400" />
-                    <span>{rec.lecStartTime || '—'}</span>
+                  {/* Start Time (Formatted Date & Time) */}
+                  <div className="col-span-2 font-mono text-slate-700 text-[11px] font-bold flex items-center gap-1 truncate" title={rec.lecStartTime}>
+                    <Clock className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                    <span className="truncate">{rec.lecStartTime || '—'}</span>
                   </div>
 
                   {/* Final BM */}
@@ -742,23 +941,45 @@ export default function AuditSheetView({
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between text-xs font-black text-slate-900">
-                    <span className="truncate">{rec.batchName}</span>
-                    <button
-                      onClick={() => handleCopyText(rec.batchName, rec.id, 'Batch Name')}
-                      className="p-1 text-slate-400 hover:text-slate-800"
-                    >
-                      {copiedId === rec.id ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                    </button>
+                  <div className="flex items-center justify-between text-xs font-black text-slate-900 gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="truncate">{rec.batchName}</span>
+                      <button
+                        onClick={() => handleCopyText(rec.batchName, rec.id, 'Batch Name')}
+                        className="p-1 text-slate-400 hover:text-slate-800 flex-shrink-0"
+                        title="Copy batch code"
+                      >
+                        {copiedId === rec.id ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                      </button>
+                    </div>
+
+                    {rec.adminUrl ? (
+                      <a
+                        href={rec.adminUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        referrerPolicy="no-referrer"
+                        className="px-2.5 py-1 bg-slate-900 hover:bg-black text-white text-[10px] font-black rounded-[2px] inline-flex items-center gap-1 uppercase tracking-wider transition-all shadow-xs active:scale-95 flex-shrink-0 cursor-pointer"
+                        title={`Open ${rec.batchName} in PW Admin Portal`}
+                      >
+                        <span>Admin</span>
+                        <ExternalLink className="w-3 h-3 opacity-90" />
+                      </a>
+                    ) : (
+                      <span className="px-2 py-0.5 bg-slate-100 text-slate-300 text-[9.5px] font-bold rounded-[2px] inline-flex items-center gap-1 uppercase tracking-wider flex-shrink-0">
+                        <span>Admin</span>
+                        <ExternalLink className="w-2.5 h-2.5" />
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between text-[11px] text-slate-600 pt-1 border-t border-slate-100">
-                    <span className="flex items-center gap-1">
-                      <Clock className="w-3 h-3 text-slate-400" />
-                      {rec.lecStartTime || 'No Time Listed'}
+                    <span className="flex items-center gap-1 font-mono font-bold text-slate-700">
+                      <Clock className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                      <span>{rec.lecStartTime || 'No Time Listed'}</span>
                     </span>
                     <span className="flex items-center gap-1 font-medium truncate max-w-[150px]">
-                      <User className="w-3 h-3 text-slate-400" />
+                      <User className="w-3 h-3 text-slate-400 flex-shrink-0" />
                       <span className="truncate">{rec.finalBm || 'No BM'}</span>
                     </span>
                   </div>
@@ -766,7 +987,7 @@ export default function AuditSheetView({
                   {rec.hasError ? (
                     <div className="p-2 rounded-[2px] bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-start gap-1.5">
                       <AlertTriangle className="w-3.5 h-3.5 text-rose-600 flex-shrink-0 mt-0.5" />
-                      <span className="break-words">{rec.errors}</span>
+                      <span className="break-words font-semibold">{rec.errors}</span>
                     </div>
                   ) : (
                     <div className="text-[10px] text-emerald-700 font-bold flex items-center gap-1">
@@ -858,10 +1079,24 @@ export default function AuditSheetView({
               </div>
             </div>
 
-            <div className="p-3 bg-slate-100 border-t border-slate-200 flex justify-end">
+            <div className="p-3 bg-slate-100 border-t border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                {detailRecord.adminUrl && (
+                  <a
+                    href={detailRecord.adminUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    referrerPolicy="no-referrer"
+                    className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white rounded-[2px] text-xs font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
+                  >
+                    <span>Open in PW Admin</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </div>
               <button
                 onClick={() => setDetailRecord(null)}
-                className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-[2px] text-xs font-bold uppercase tracking-wider cursor-pointer"
+                className="px-4 py-1.5 bg-white hover:bg-slate-200 border border-slate-300 text-slate-800 rounded-[2px] text-xs font-bold uppercase tracking-wider cursor-pointer"
               >
                 Close
               </button>
