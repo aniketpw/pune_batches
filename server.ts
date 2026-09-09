@@ -1225,6 +1225,14 @@ app.use((req, _res, next) => {
       day: "2-digit",
     }).format(tomorrowDateObj);
 
+    const yesterdayDateObj = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const yesterdayIstParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(yesterdayDateObj);
+
     const currentYearStr = todayIstParts.split('-')[0];
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -1235,6 +1243,7 @@ app.use((req, _res, next) => {
 
     const todayDisplay = formatIsoDisplay(todayIstParts);
     const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
+    const yesterdayDisplay = formatIsoDisplay(yesterdayIstParts);
 
     const allLectures: any[] = [];
     const centersFound = new Set<string>();
@@ -1337,6 +1346,7 @@ app.use((req, _res, next) => {
         let displayDate = rawDate;
         let isToday = false;
         let isTomorrow = false;
+        let isYesterday = false;
         let isPast = false;
         let isUpcoming = false;
 
@@ -1346,6 +1356,9 @@ app.use((req, _res, next) => {
             isToday = true;
           } else if (isoDate === tomorrowIstParts) {
             isTomorrow = true;
+          } else if (isoDate === yesterdayIstParts) {
+            isYesterday = true;
+            isPast = true;
           } else if (isoDate < todayIstParts) {
             isPast = true;
           } else {
@@ -1364,6 +1377,10 @@ app.use((req, _res, next) => {
           const lowerDate = rawDate.toLowerCase();
           if (lowerDate.includes('today')) isToday = true;
           else if (lowerDate.includes('tomorrow')) isTomorrow = true;
+          else if (lowerDate.includes('yesterday')) {
+            isYesterday = true;
+            isPast = true;
+          }
         }
 
         // Exact Announcement message from Column K, or clean standard format if empty
@@ -1407,12 +1424,14 @@ app.use((req, _res, next) => {
           isDone,
           isToday,
           isTomorrow,
+          isYesterday,
           isPast,
           isUpcoming,
         });
       }
     }
 
+    const yesterdayCount = allLectures.filter((c) => c.isYesterday).length;
     const todayCount = allLectures.filter((c) => c.isToday).length;
     const tomorrowCount = allLectures.filter((c) => c.isTomorrow).length;
     const upcomingCount = allLectures.filter((c) => c.isUpcoming).length;
@@ -1424,11 +1443,14 @@ app.use((req, _res, next) => {
     const responsePayload = {
       todayDate: todayIstParts,
       tomorrowDate: tomorrowIstParts,
+      yesterdayDate: yesterdayIstParts,
       todayDateDisplay: todayDisplay,
       tomorrowDateDisplay: tomorrowDisplay,
+      yesterdayDateDisplay: yesterdayDisplay,
       centers: ALLOWED_EXTRA_CLASS_CENTERS,
       classes: allLectures,
       counts: {
+        yesterday: yesterdayCount,
         today: todayCount,
         tomorrow: tomorrowCount,
         upcoming: upcomingCount,
@@ -1937,24 +1959,51 @@ app.use((req, _res, next) => {
           isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
         );
 
-        matchingExtraClasses = allMatchingExtra.map((ec: any) => ({
-          id: ec.id,
-          center: ec.center,
-          batchCode: ec.batchCode,
-          day: ec.day,
-          date: ec.displayDate || ec.rawDate,
-          timeRange: ec.timeRange,
-          teacherName: ec.teacherName || ec.facultyCode || "Faculty",
-          subject: ec.subject || "Extra Lecture",
-          room: ec.room || "Room TBA",
-          announcement: ec.announcement || "",
-          announcementStatus: ec.rawStatus || (ec.isDone ? "Done" : "Pending"),
-          isDone: !!ec.isDone,
-          isToday: !!ec.isToday,
-          isTomorrow: !!ec.isTomorrow,
-          isUpcoming: !!ec.isUpcoming,
-          isPast: !!ec.isPast,
-        }));
+        // Filter strictly to Yesterday, Today, and Tomorrow (discarding all old historical classes like August 2025)
+        const relevantExtra = allMatchingExtra.filter(
+          (ec: any) => ec.isYesterday || ec.isToday || ec.isTomorrow
+        );
+
+        // Chronological sort: Yesterday -> Today -> Tomorrow, then by start time
+        const dateOrder = (item: any) => {
+          if (item.isYesterday) return 1;
+          if (item.isToday) return 2;
+          if (item.isTomorrow) return 3;
+          return 4;
+        };
+
+        relevantExtra.sort((a: any, b: any) => {
+          const orderDiff = dateOrder(a) - dateOrder(b);
+          if (orderDiff !== 0) return orderDiff;
+          return (a.inTime || "").localeCompare(b.inTime || "");
+        });
+
+        matchingExtraClasses = relevantExtra.map((ec: any) => {
+          let dateTag: 'YESTERDAY' | 'TODAY' | 'TOMORROW' = 'TODAY';
+          if (ec.isYesterday) dateTag = 'YESTERDAY';
+          else if (ec.isTomorrow) dateTag = 'TOMORROW';
+
+          return {
+            id: ec.id,
+            center: ec.center,
+            batchCode: ec.batchCode,
+            day: ec.day,
+            date: ec.displayDate || ec.rawDate,
+            timeRange: ec.timeRange,
+            teacherName: ec.teacherName || ec.facultyCode || "Faculty",
+            subject: ec.subject || "Extra Lecture",
+            room: ec.room || "Room TBA",
+            announcement: ec.announcement || "",
+            announcementStatus: ec.rawStatus || (ec.isDone ? "Done" : "Pending"),
+            isDone: !!ec.isDone,
+            isToday: !!ec.isToday,
+            isTomorrow: !!ec.isTomorrow,
+            isYesterday: !!ec.isYesterday,
+            isUpcoming: !!ec.isUpcoming,
+            isPast: !!ec.isPast,
+            dateTag,
+          };
+        });
 
         const activeExtra = allMatchingExtra.filter((ec: any) => !ec.isPast || ec.isToday);
         if (activeExtra.length > 0) {
@@ -2473,12 +2522,12 @@ res.status(500).json({ error: err.message || "Failed to mark extra class status 
 
     let extraClassContext = "";
     if (Array.isArray(extraClasses) && extraClasses.length > 0) {
-      extraClassContext = `\n### 📌 EXTRA CLASSES & ANNOUNCEMENT STATUS (${extraClasses.length}):\n` +
+      extraClassContext = `\n### 📌 RECENT EXTRA CLASSES (YESTERDAY / TODAY / TOMORROW) & ANNOUNCEMENT STATUS (${extraClasses.length}):\n` +
         extraClasses.map((ec: any, i: number) =>
-          `- **Extra Lecture ${i + 1} (${ec.date} • ${ec.timeRange})**: Subject: **${ec.subject}** | Faculty: **${ec.teacherName}** | Room: **${ec.room}** | Announcement Status: **${ec.isDone ? "✓ ANNOUNCEMENT DONE (Column O)" : "⚠️ ANNOUNCEMENT PENDING (Column O)"}**`
+          `- **Extra Lecture ${i + 1} (${ec.dateTag || (ec.isToday ? "TODAY" : ec.isTomorrow ? "TOMORROW" : "YESTERDAY")} • ${ec.date} • ${ec.timeRange})**: Subject: **${ec.subject}** | Faculty: **${ec.teacherName}** | Room: **${ec.room}** | Announcement Status: **${ec.isDone ? "✓ ANNOUNCEMENT DONE (Column O)" : "⚠️ ANNOUNCEMENT PENDING (Column O)"}**`
         ).join("\n");
     } else {
-      extraClassContext = `\n### 📌 EXTRA CLASSES: No extra classes scheduled for this batch.`;
+      extraClassContext = `\n### 📌 EXTRA CLASSES: No extra classes scheduled for yesterday, today, or tomorrow for this batch.`;
     }
 
     const fallbackText = `### 📋 Batch Details: **${batchCode}**

@@ -969,6 +969,13 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
     month: "2-digit",
     day: "2-digit"
   }).format(tomorrowDateObj);
+  const yesterdayDateObj = new Date(now.getTime() - 24 * 60 * 60 * 1e3);
+  const yesterdayIstParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(yesterdayDateObj);
   const currentYearStr = todayIstParts.split("-")[0];
   const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const formatIsoDisplay = (iso) => {
@@ -977,6 +984,7 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
   };
   const todayDisplay = formatIsoDisplay(todayIstParts);
   const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
+  const yesterdayDisplay = formatIsoDisplay(yesterdayIstParts);
   const allLectures = [];
   const centersFound = /* @__PURE__ */ new Set();
   for (const { sheetTitle, centerName, rows } of sheetResults) {
@@ -1048,6 +1056,7 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
       let displayDate = rawDate;
       let isToday = false;
       let isTomorrow = false;
+      let isYesterday = false;
       let isPast = false;
       let isUpcoming = false;
       if (isoDate) {
@@ -1056,6 +1065,9 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
           isToday = true;
         } else if (isoDate === tomorrowIstParts) {
           isTomorrow = true;
+        } else if (isoDate === yesterdayIstParts) {
+          isYesterday = true;
+          isPast = true;
         } else if (isoDate < todayIstParts) {
           isPast = true;
         } else {
@@ -1073,6 +1085,10 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
         const lowerDate = rawDate.toLowerCase();
         if (lowerDate.includes("today")) isToday = true;
         else if (lowerDate.includes("tomorrow")) isTomorrow = true;
+        else if (lowerDate.includes("yesterday")) {
+          isYesterday = true;
+          isPast = true;
+        }
       }
       if (!announcement) {
         announcement = `Dear Vidyapeeth Students, ${teacherName || facultyCode || "Faculty"} Sir/Ma'am will take ${classType || "Extra Class"} of ${subject || "Special Subject"} at (${displayDate || rawDate}) at (${inTime || "TBD"} to ${outTime || "TBD"}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
@@ -1110,11 +1126,13 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
         isDone,
         isToday,
         isTomorrow,
+        isYesterday,
         isPast,
         isUpcoming
       });
     }
   }
+  const yesterdayCount = allLectures.filter((c) => c.isYesterday).length;
   const todayCount = allLectures.filter((c) => c.isToday).length;
   const tomorrowCount = allLectures.filter((c) => c.isTomorrow).length;
   const upcomingCount = allLectures.filter((c) => c.isUpcoming).length;
@@ -1124,11 +1142,14 @@ async function fetchAllExtraClassLectures(sheets = null, forceRefresh = false) {
   const responsePayload = {
     todayDate: todayIstParts,
     tomorrowDate: tomorrowIstParts,
+    yesterdayDate: yesterdayIstParts,
     todayDateDisplay: todayDisplay,
     tomorrowDateDisplay: tomorrowDisplay,
+    yesterdayDateDisplay: yesterdayDisplay,
     centers: ALLOWED_EXTRA_CLASS_CENTERS,
     classes: allLectures,
     counts: {
+      yesterday: yesterdayCount,
       today: todayCount,
       tomorrow: tomorrowCount,
       upcoming: upcomingCount,
@@ -1545,24 +1566,45 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       const allMatchingExtra = (extraPayload.classes || []).filter(
         (ec) => isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
       );
-      matchingExtraClasses = allMatchingExtra.map((ec) => ({
-        id: ec.id,
-        center: ec.center,
-        batchCode: ec.batchCode,
-        day: ec.day,
-        date: ec.displayDate || ec.rawDate,
-        timeRange: ec.timeRange,
-        teacherName: ec.teacherName || ec.facultyCode || "Faculty",
-        subject: ec.subject || "Extra Lecture",
-        room: ec.room || "Room TBA",
-        announcement: ec.announcement || "",
-        announcementStatus: ec.rawStatus || (ec.isDone ? "Done" : "Pending"),
-        isDone: !!ec.isDone,
-        isToday: !!ec.isToday,
-        isTomorrow: !!ec.isTomorrow,
-        isUpcoming: !!ec.isUpcoming,
-        isPast: !!ec.isPast
-      }));
+      const relevantExtra = allMatchingExtra.filter(
+        (ec) => ec.isYesterday || ec.isToday || ec.isTomorrow
+      );
+      const dateOrder = (item) => {
+        if (item.isYesterday) return 1;
+        if (item.isToday) return 2;
+        if (item.isTomorrow) return 3;
+        return 4;
+      };
+      relevantExtra.sort((a, b) => {
+        const orderDiff = dateOrder(a) - dateOrder(b);
+        if (orderDiff !== 0) return orderDiff;
+        return (a.inTime || "").localeCompare(b.inTime || "");
+      });
+      matchingExtraClasses = relevantExtra.map((ec) => {
+        let dateTag = "TODAY";
+        if (ec.isYesterday) dateTag = "YESTERDAY";
+        else if (ec.isTomorrow) dateTag = "TOMORROW";
+        return {
+          id: ec.id,
+          center: ec.center,
+          batchCode: ec.batchCode,
+          day: ec.day,
+          date: ec.displayDate || ec.rawDate,
+          timeRange: ec.timeRange,
+          teacherName: ec.teacherName || ec.facultyCode || "Faculty",
+          subject: ec.subject || "Extra Lecture",
+          room: ec.room || "Room TBA",
+          announcement: ec.announcement || "",
+          announcementStatus: ec.rawStatus || (ec.isDone ? "Done" : "Pending"),
+          isDone: !!ec.isDone,
+          isToday: !!ec.isToday,
+          isTomorrow: !!ec.isTomorrow,
+          isYesterday: !!ec.isYesterday,
+          isUpcoming: !!ec.isUpcoming,
+          isPast: !!ec.isPast,
+          dateTag
+        };
+      });
       const activeExtra = allMatchingExtra.filter((ec) => !ec.isPast || ec.isToday);
       if (activeExtra.length > 0) {
         const { now } = getIstDateInfo();
@@ -2012,13 +2054,13 @@ Upcoming scheduled classes:
   let extraClassContext = "";
   if (Array.isArray(extraClasses) && extraClasses.length > 0) {
     extraClassContext = `
-### \u{1F4CC} EXTRA CLASSES & ANNOUNCEMENT STATUS (${extraClasses.length}):
+### \u{1F4CC} RECENT EXTRA CLASSES (YESTERDAY / TODAY / TOMORROW) & ANNOUNCEMENT STATUS (${extraClasses.length}):
 ` + extraClasses.map(
-      (ec, i) => `- **Extra Lecture ${i + 1} (${ec.date} \u2022 ${ec.timeRange})**: Subject: **${ec.subject}** | Faculty: **${ec.teacherName}** | Room: **${ec.room}** | Announcement Status: **${ec.isDone ? "\u2713 ANNOUNCEMENT DONE (Column O)" : "\u26A0\uFE0F ANNOUNCEMENT PENDING (Column O)"}**`
+      (ec, i) => `- **Extra Lecture ${i + 1} (${ec.dateTag || (ec.isToday ? "TODAY" : ec.isTomorrow ? "TOMORROW" : "YESTERDAY")} \u2022 ${ec.date} \u2022 ${ec.timeRange})**: Subject: **${ec.subject}** | Faculty: **${ec.teacherName}** | Room: **${ec.room}** | Announcement Status: **${ec.isDone ? "\u2713 ANNOUNCEMENT DONE (Column O)" : "\u26A0\uFE0F ANNOUNCEMENT PENDING (Column O)"}**`
     ).join("\n");
   } else {
     extraClassContext = `
-### \u{1F4CC} EXTRA CLASSES: No extra classes scheduled for this batch.`;
+### \u{1F4CC} EXTRA CLASSES: No extra classes scheduled for yesterday, today, or tomorrow for this batch.`;
   }
   const fallbackText = `### \u{1F4CB} Batch Details: **${batchCode}**
       

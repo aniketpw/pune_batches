@@ -86,8 +86,10 @@ export interface BatchExtraClassItem {
   isDone: boolean;
   isToday: boolean;
   isTomorrow: boolean;
+  isYesterday?: boolean;
   isUpcoming: boolean;
   isPast: boolean;
+  dateTag?: 'YESTERDAY' | 'TODAY' | 'TOMORROW' | 'OTHER';
 }
 
 export interface BatchScheduleResponse {
@@ -175,6 +177,7 @@ export interface ExtraLectureItem {
   isDone: boolean;
   isToday: boolean;
   isTomorrow: boolean;
+  isYesterday?: boolean;
   isPast: boolean;
   isUpcoming: boolean;
   adminUrl?: string;
@@ -184,11 +187,14 @@ export interface ExtraClassScheduleResponse {
   spreadsheetId: string;
   todayDate: string;
   tomorrowDate: string;
+  yesterdayDate?: string;
   todayDateDisplay: string;
   tomorrowDateDisplay: string;
+  yesterdayDateDisplay?: string;
   centers: string[];
   classes: ExtraLectureItem[];
   counts: {
+    yesterday?: number;
     today: number;
     tomorrow: number;
     upcoming: number;

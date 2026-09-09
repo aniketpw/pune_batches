@@ -71,6 +71,7 @@ export default function AiCopilotPanel({
   const [copiedEmailId, setCopiedEmailId] = useState<string | null>(null);
   const [expandedNoticeId, setExpandedNoticeId] = useState<string | null>(null);
   const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
+  const [extraClassDayFilter, setExtraClassDayFilter] = useState<'ALL' | 'TODAY' | 'TOMORROW' | 'YESTERDAY'>('ALL');
   const contentScrollRef = useRef<HTMLDivElement>(null);
   const aiSectionRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef<number>(0);
@@ -453,6 +454,24 @@ export default function AiCopilotPanel({
     const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     window.open(waUrl, '_blank');
   };
+
+  const extraDayCounts = useMemo(() => {
+    const list = scheduleData?.extraClasses || [];
+    return {
+      all: list.length,
+      today: list.filter((e) => e.isToday).length,
+      tomorrow: list.filter((e) => e.isTomorrow).length,
+      yesterday: list.filter((e) => e.isYesterday).length,
+    };
+  }, [scheduleData?.extraClasses]);
+
+  const displayedExtraClasses = useMemo(() => {
+    const list = scheduleData?.extraClasses || [];
+    if (extraClassDayFilter === 'TODAY') return list.filter((e) => e.isToday);
+    if (extraClassDayFilter === 'TOMORROW') return list.filter((e) => e.isTomorrow);
+    if (extraClassDayFilter === 'YESTERDAY') return list.filter((e) => e.isYesterday);
+    return list;
+  }, [scheduleData?.extraClasses, extraClassDayFilter]);
 
   const quickQuestions = [
     "Draft WhatsApp reminder for students",
@@ -1331,7 +1350,7 @@ export default function AiCopilotPanel({
                   <div className="flex items-center gap-2 min-w-0">
                     <Sparkles className="w-4 h-4 text-indigo-600 flex-shrink-0" />
                     <span className="text-[11px] sm:text-xs font-black text-slate-900 uppercase tracking-wider truncate">
-                      Extra Classes & Announcements
+                      Extra Classes (Yesterday, Today & Tomorrow)
                     </span>
                   </div>
                   {isScheduleLoading ? (
@@ -1350,15 +1369,71 @@ export default function AiCopilotPanel({
                   )}
                 </div>
 
+                {/* Day Filter Pills for Extra Classes (Yesterday / Today / Tomorrow) */}
+                {scheduleData?.extraClasses && scheduleData.extraClasses.length > 0 && (
+                  <div className="px-3.5 pt-2 pb-1.5 flex items-center gap-1.5 overflow-x-auto scrollbar-none border-b border-slate-100 bg-slate-50/50">
+                    <button
+                      type="button"
+                      onClick={() => setExtraClassDayFilter('ALL')}
+                      className={`px-2 py-0.5 rounded-[1px] text-[8.5px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                        extraClassDayFilter === 'ALL'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white hover:bg-slate-200 text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      All ({extraDayCounts.all})
+                    </button>
+                    {extraDayCounts.today > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setExtraClassDayFilter('TODAY')}
+                        className={`px-2 py-0.5 rounded-[1px] text-[8.5px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          extraClassDayFilter === 'TODAY'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        }`}
+                      >
+                        Today ({extraDayCounts.today})
+                      </button>
+                    )}
+                    {extraDayCounts.tomorrow > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setExtraClassDayFilter('TOMORROW')}
+                        className={`px-2 py-0.5 rounded-[1px] text-[8.5px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          extraClassDayFilter === 'TOMORROW'
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200'
+                        }`}
+                      >
+                        Tomorrow ({extraDayCounts.tomorrow})
+                      </button>
+                    )}
+                    {extraDayCounts.yesterday > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setExtraClassDayFilter('YESTERDAY')}
+                        className={`px-2 py-0.5 rounded-[1px] text-[8.5px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          extraClassDayFilter === 'YESTERDAY'
+                            ? 'bg-slate-700 text-white'
+                            : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
+                        }`}
+                      >
+                        Yesterday ({extraDayCounts.yesterday})
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 <div className="p-3 sm:p-3.5 space-y-2">
                   {isScheduleLoading ? (
                     <div className="py-4 text-center text-[10px] text-slate-400 font-bold uppercase tracking-wider flex items-center justify-center gap-1.5">
                       <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-500" />
                       Checking extra class records...
                     </div>
-                  ) : scheduleData?.extraClasses && scheduleData.extraClasses.length > 0 ? (
+                  ) : displayedExtraClasses && displayedExtraClasses.length > 0 ? (
                     <div className="space-y-2.5">
-                      {scheduleData.extraClasses.map((ec) => {
+                      {displayedExtraClasses.map((ec) => {
                         const isExpanded = expandedNoticeId === ec.id;
                         const isCopied = copiedNoticeId === ec.id;
 
@@ -1371,9 +1446,22 @@ export default function AiCopilotPanel({
                                 : 'bg-amber-50/40 border-amber-200'
                             }`}
                           >
-                            {/* Top row: Date, Time & Announcement Badge */}
+                            {/* Top row: Date Tag, Date, Time & Announcement Badge */}
                             <div className="flex items-center justify-between gap-2 flex-wrap">
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {ec.isToday ? (
+                                  <span className="px-1.5 py-0.5 bg-emerald-600 text-white font-black uppercase rounded-[1px] text-[7.5px] tracking-wider shadow-2xs">
+                                    TODAY
+                                  </span>
+                                ) : ec.isTomorrow ? (
+                                  <span className="px-1.5 py-0.5 bg-indigo-600 text-white font-black uppercase rounded-[1px] text-[7.5px] tracking-wider shadow-2xs">
+                                    TOMORROW
+                                  </span>
+                                ) : ec.isYesterday ? (
+                                  <span className="px-1.5 py-0.5 bg-slate-700 text-white font-black uppercase rounded-[1px] text-[7.5px] tracking-wider shadow-2xs">
+                                    YESTERDAY
+                                  </span>
+                                ) : null}
                                 <span className="px-1.5 py-0.5 bg-white text-slate-800 border border-slate-200 font-black uppercase rounded-[1px] text-[8.5px]">
                                   {ec.date} ({ec.day})
                                 </span>
@@ -1465,7 +1553,7 @@ export default function AiCopilotPanel({
                                     onClick={() => handleShareExtraWhatsApp(ec)}
                                     className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-[2px] text-[9px] font-bold flex items-center gap-1 cursor-pointer"
                                   >
-                                    <Share2 className="w-3 h-3" />
+                                    <Share2 className="w-3.5 h-3.5" />
                                     <span>WhatsApp Share</span>
                                   </button>
                                 </div>
@@ -1479,9 +1567,13 @@ export default function AiCopilotPanel({
                     <div className="flex items-center gap-2 p-2.5 bg-slate-50 border border-slate-200/80 rounded-[2px] text-slate-600 text-xs">
                       <BookOpen className="w-4 h-4 text-slate-400 flex-shrink-0" />
                       <div className="min-w-0">
-                        <p className="font-bold text-[11px] text-slate-800">No Extra Classes Scheduled</p>
+                        <p className="font-bold text-[11px] text-slate-800">
+                          {extraClassDayFilter === 'ALL'
+                            ? 'No Extra Classes for Yesterday, Today or Tomorrow'
+                            : `No Extra Classes for ${extraClassDayFilter}`}
+                        </p>
                         <p className="text-[9.5px] text-slate-500">
-                          There are no extra lectures recorded for this batch in the Extra Class tracker.
+                          There are no extra lectures recorded for this batch in the active window (Yesterday, Today, Tomorrow).
                         </p>
                       </div>
                     </div>
