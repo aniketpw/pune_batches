@@ -88,17 +88,6 @@ var TIMETABLE_SHEET_IDS = [
   "1KbI77PEFsxFqFB1ElUQlqSxz9ixTBevxt7wJPNI8FFU",
   "1po8VrTl5DXXwxcJN_evxQRn_5S4oNcxnbObQ5rd2K0w"
 ];
-var TIMETABLE_SHEET_CONFIG = {
-  "1U5BGET6T_6vzFdEj1BrktFyeKAUNM3le-d6_QXX3IdE": { gid: 101475223 },
-  "1YRDNMMvsCO8zBzfWP2JA__ewJZqyb8oIUBG8n3evps8": { gid: 1000661459 },
-  "1aUGmqbnCdVIXrmRXwHTItUN6kKTmk0UFuFi5D172NC4": { gid: 1000661459 },
-  "1qsgnhF3JTHPJKYSf19uSj5xtivxIDib1CnwSj-kSioE": { gid: 1000661459 },
-  "1PnpJ7N0VGyn093T3DGxg5DY7RgcEw1sjvJh7ZWhRw20": { gid: 1000661459 },
-  "103nQ5mxTrQFu8fQgppgzQIkOhbIrrY4VN5s3WpFx4p4": { gid: 1000661459 },
-  "1JtBcMmkNwnt2hqNgIEBGwNlcdEN4YziQYAN4j6q3GE0": { gid: 101475223 },
-  "1KbI77PEFsxFqFB1ElUQlqSxz9ixTBevxt7wJPNI8FFU": { gid: 1133308606 },
-  "1po8VrTl5DXXwxcJN_evxQRn_5S4oNcxnbObQ5rd2K0w": { gid: 2078808889 }
-};
 var centerTimetableMap = {};
 function getIstDateInfo() {
   const now = /* @__PURE__ */ new Date();
@@ -169,20 +158,16 @@ async function fetchRawDbWithCache(sheets, spreadsheetId, forceRefresh = false) 
     }
     const sheetsList = metaRes.data?.sheets || [];
     if (sheetsList.length > 0) {
-      const targetGid = TIMETABLE_SHEET_CONFIG[spreadsheetId]?.gid;
-      if (targetGid !== void 0) {
-        const gidTab = sheetsList.find((s) => s.properties?.sheetId === targetGid);
-        if (gidTab?.properties?.title) {
-          targetSheetTitle = gidTab.properties.title;
-        }
-      }
-      if (!targetSheetTitle || targetSheetTitle === "Raw_DB") {
-        const matchTab = sheetsList.find((s) => {
-          const t = (s.properties?.title || "").trim().toLowerCase();
-          return t === "raw_db" || t.includes("raw_db") || t.includes("raw db") || t.includes("raw-db") || t.includes("timetable");
-        });
-        if (matchTab?.properties?.title) {
-          targetSheetTitle = matchTab.properties.title;
+      const matchTab = sheetsList.find((s) => {
+        const t = (s.properties?.title || "").trim().toLowerCase();
+        return t === "raw_db" || t === "raw db" || t.includes("raw_db") || t.includes("raw db") || t.includes("raw-db");
+      });
+      if (matchTab?.properties?.title) {
+        targetSheetTitle = matchTab.properties.title;
+      } else {
+        const ttTab = sheetsList.find((s) => (s.properties?.title || "").trim().toLowerCase().includes("timetable"));
+        if (ttTab?.properties?.title) {
+          targetSheetTitle = ttTab.properties.title;
         } else if (sheetsList[0]?.properties?.title) {
           targetSheetTitle = sheetsList[0].properties.title;
         }
@@ -282,26 +267,14 @@ function normalizeDateStr(dateStr) {
   return s;
 }
 function isDateOrDayMatchingToday(rowDate, rowDay, todayDateStr, todayDayStr, nowIst) {
-  const normRowDate = normalizeDateStr(rowDate);
-  const normToday = normalizeDateStr(todayDateStr);
   const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
   const normTodayDay = (todayDayStr || "").trim().toUpperCase().substring(0, 3);
-  if (normRowDate && normToday) {
-    if (normRowDate === normToday || normRowDate.includes(normToday) || normToday.includes(normRowDate)) {
-      return true;
-    }
-    try {
-      const parsed = new Date(rowDate);
-      if (!isNaN(parsed.getTime())) {
-        if (parsed.getDate() === nowIst.getDate() && parsed.getMonth() === nowIst.getMonth() && parsed.getFullYear() === nowIst.getFullYear()) {
-          return true;
-        }
-      }
-    } catch {
-    }
-    return false;
-  }
   if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
+    return true;
+  }
+  const normRowDate = normalizeDateStr(rowDate);
+  const normToday = normalizeDateStr(todayDateStr);
+  if (normRowDate && normToday && (normRowDate.includes(normToday) || normToday.includes(normRowDate))) {
     return true;
   }
   return false;
@@ -446,54 +419,6 @@ function parseRawDbRows(rows) {
     });
   }
   return deduplicateLectures(result);
-}
-function filterCurrentOrLatestWeekLectures(lectures, todayIso) {
-  if (!lectures || lectures.length === 0) return [];
-  const currentYear = todayIso.substring(0, 4);
-  const dateMap = /* @__PURE__ */ new Map();
-  const isoDates = [];
-  for (const lec of lectures) {
-    if (lec.lectureDate) {
-      const iso = parseDateToIso(lec.lectureDate, currentYear);
-      if (iso) {
-        dateMap.set(lec, iso);
-        if (!isoDates.includes(iso)) isoDates.push(iso);
-      }
-    }
-  }
-  if (isoDates.length === 0) return lectures;
-  isoDates.sort();
-  const [ty, tm, td] = todayIso.split("-").map(Number);
-  const todayObj = new Date(Date.UTC(ty, tm - 1, td, 12, 0, 0));
-  const dayOfWeek = todayObj.getUTCDay();
-  const diffToMon = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-  const monObj = new Date(todayObj.getTime() + diffToMon * 864e5);
-  const sunObj = new Date(monObj.getTime() + 6 * 864e5);
-  const monIso = monObj.toISOString().substring(0, 10);
-  const sunIso = sunObj.toISOString().substring(0, 10);
-  const currentWeekLectures = lectures.filter((lec) => {
-    const iso = dateMap.get(lec);
-    if (!iso) return true;
-    return iso >= monIso && iso <= sunIso;
-  });
-  const hasCurrentWeekDates = currentWeekLectures.some((l) => dateMap.has(l));
-  if (hasCurrentWeekDates) {
-    return currentWeekLectures;
-  }
-  const latestIso = isoDates[isoDates.length - 1];
-  const [ly, lm, ld] = latestIso.split("-").map(Number);
-  const latestObj = new Date(Date.UTC(ly, lm - 1, ld, 12, 0, 0));
-  const lDay = latestObj.getUTCDay();
-  const lDiffToMon = lDay === 0 ? -6 : 1 - lDay;
-  const latestMon = new Date(latestObj.getTime() + lDiffToMon * 864e5);
-  const latestSun = new Date(latestMon.getTime() + 6 * 864e5);
-  const lMonIso = latestMon.toISOString().substring(0, 10);
-  const lSunIso = latestSun.toISOString().substring(0, 10);
-  return lectures.filter((lec) => {
-    const iso = dateMap.get(lec);
-    if (!iso) return true;
-    return iso >= lMonIso && iso <= lSunIso;
-  });
 }
 function deduplicateLectures(lectures) {
   const seen = /* @__PURE__ */ new Map();
@@ -1777,9 +1702,6 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       console.warn("Could not query audit sheet for batch-schedule:", auditErr.message);
     }
     const { now, dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
-    const currentYearStr = String(now.getFullYear());
-    const todayIso = parseDateToIso(todayDate, currentYearStr) || now.toISOString().substring(0, 10);
-    foundLectures = filterCurrentOrLatestWeekLectures(foundLectures, todayIso);
     foundLectures = deduplicateLectures(foundLectures);
     const dayWeight = {
       MON: 1,

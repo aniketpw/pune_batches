@@ -566,18 +566,11 @@ export default function AiCopilotPanel({
     if (scheduleData.todayLectures && scheduleData.todayLectures.length > 0) {
       return scheduleData.todayLectures;
     }
-    // Fallback: only match if lecture has NO conflicting date, or matches today's date
     const todayD3 = (scheduleData.todayDay || new Date().toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Kolkata' })).toUpperCase().substring(0, 3);
-    const todayDateStr = scheduleData.todayDate || '';
     return (scheduleData.allLectures || []).filter((l) => {
       if (l.isToday) return true;
       const d3 = getLectureDay(l);
-      if (d3 !== todayD3) return false;
-      // If lecture has a date, ensure it is today's date
-      if (l.lectureDate && todayDateStr) {
-        return l.lectureDate.includes(todayDateStr) || todayDateStr.includes(l.lectureDate);
-      }
-      return !l.lectureDate; // only keep undated recurring lectures
+      return d3 === todayD3;
     });
   }, [scheduleData, getLectureDay]);
 
@@ -685,16 +678,15 @@ export default function AiCopilotPanel({
               <Clock className="w-3.5 h-3.5 text-indigo-600 flex-shrink-0" />
               {cleanTime}
             </span>
-            {showDayBadge && lec.day && (
-              <span className="px-1.5 py-0.5 bg-slate-200 text-slate-800 rounded-[2px] text-[9px] font-black uppercase">
+            {lec.isToday ? (
+              <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-[2px] text-[8.5px] font-bold">
+                {scheduleData?.todayDate || 'Today'}
+              </span>
+            ) : lec.day ? (
+              <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-[2px] text-[8.5px] font-bold">
                 {lec.day}
               </span>
-            )}
-            {lec.lectureDate && (
-              <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-[2px] text-[8.5px] font-bold">
-                {lec.isToday && scheduleData?.todayDate ? scheduleData.todayDate : lec.lectureDate}
-              </span>
-            )}
+            ) : null}
           </div>
 
           <div className="flex items-center gap-1.5 flex-shrink-0">
