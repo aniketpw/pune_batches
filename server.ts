@@ -1884,6 +1884,8 @@ ${scheduleContext}
       const prompt = `You are "Batch Finder Pro AI Copilot" - an expert assistant for Physics Wallah (PW) offline centers in India.
 Your task is to decode this specific batch code: "${batchCode}".
 
+CRITICAL LANGUAGE REQUIREMENT: All responses, briefings, action checklists, and WhatsApp messages MUST be strictly in 100% professional English. Never output Hindi, Hinglish, or Devanagari script under any circumstances, regardless of the language used by the user in their prompt.
+
 Context details provided:
 - Active Center / Tab: "${tabName || "Unknown"}"
 - Stream Category: "${category || "Unknown"}"
@@ -1895,7 +1897,7 @@ Context details provided:
 LIVE TIMETABLE DATA FROM 'Raw_DB' (Column AI = Subject, Column AK = Teacher Email):
 ${scheduleContext}
 
-Please provide a highly polished, professional, and actionable academic briefing in Markdown:
+Please provide a highly polished, professional, and actionable academic briefing in Markdown (STRICTLY IN ENGLISH ONLY):
 
 1. **📅 Today's Live Academic Schedule & Subject Flow**:
    - Clearly detail today's classes: subject (from Column AI), lecture timing, faculty code, and teacher's email (from Column AK).
@@ -1905,9 +1907,9 @@ Please provide a highly polished, professional, and actionable academic briefing
 3. **📋 Batch Manager Action Checklist for Today**:
    - Provide 2-3 specific, tactical steps for ${bmEmail || "the BM"} for today's classes (e.g. verifying attendance, confirming room prep with faculty, ensuring DPP distribution).
 4. **💬 Student Daily Reminder Draft (WhatsApp format)**:
-   - Provide a concise, ready-to-copy WhatsApp message for students mentioning today's lecture times and subjects.
+   - Provide a concise, ready-to-copy WhatsApp message for students mentioning today's lecture times and subjects in clear English.
 
-Keep the output clean, encouraging, professional, and under 400 words.`;
+Keep the output clean, encouraging, professional, strictly in English, and under 400 words.`;
 
       if (openRouterKey.startsWith("sk-or-v1-")) {
         const candidateModels = [
@@ -1984,7 +1986,8 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
 
       // Check if key is an OpenRouter key
       if (openRouterKey.startsWith("sk-or-v1-")) {
-        const systemPrompt = `You are "Batch Finder Pro AI Copilot", a brilliant academic coordinator and counselor for Physics Wallah (PW) centers. Help the Batch Manager with operational issues, student messaging, organizing Drive files, and answering center-related questions. You have live access to the center timetable from Raw_DB. Keep answers clear, tactical, and brief (under 200 words).${
+        const systemPrompt = `You are "Batch Finder Pro AI Copilot", a brilliant academic coordinator and counselor for Physics Wallah (PW) centers. Help the Batch Manager with operational issues, student messaging, organizing Drive files, and answering center-related questions. You have live access to the center timetable from Raw_DB. Keep answers clear, tactical, and brief (under 200 words).
+CRITICAL LANGUAGE POLICY: All responses, briefings, action checklists, recommendations, and messages MUST be strictly in 100% professional English. Under no circumstances should you output Hindi, Hinglish, or Devanagari script, even if the user prompts you in Hindi or Hinglish.${
           contextBatch
             ? `\n\nContext: The user is currently viewing batch "${contextBatch.displayName}" (Category: ${contextBatch.category}, Phase: ${contextBatch.phase}, Shift: ${contextBatch.timeSlot}, Manager Assigned: ${contextBatch.bmEmail || "None"}).${scheduleText}`
             : ""
@@ -2063,11 +2066,11 @@ ${scheduleText ? `📅 **Live Schedule Context:**\n${scheduleText}\n\n` : ""}Her
       // Inject system instruction in content
       formattedContents.push({
         role: "user",
-        parts: [{ text: `System Command: You are "Batch Finder Pro AI Copilot", a brilliant academic coordinator and counselor for Physics Wallah (PW) centers. Help the Batch Manager with operational issues, student messaging, organizing Drive files, and answering center-related questions. You have live access to the center timetable from Raw_DB. Keep answers clear, tactical, and brief (under 200 words).` }]
+        parts: [{ text: `System Command: You are "Batch Finder Pro AI Copilot", a brilliant academic coordinator and counselor for Physics Wallah (PW) centers. Help the Batch Manager with operational issues, student messaging, organizing Drive files, and answering center-related questions. You have live access to the center timetable from Raw_DB. Keep answers clear, tactical, and brief (under 200 words). CRITICAL LANGUAGE POLICY: All responses, briefings, action checklists, recommendations, and messages MUST be strictly in 100% professional English. Never output Hindi, Hinglish, or Devanagari script under any circumstances, even if asked in Hindi or Hinglish.` }]
       });
       formattedContents.push({
         role: "model",
-        parts: [{ text: "Understood. I am ready to assist the Batch Manager with actionable and professional guidance." }]
+        parts: [{ text: "Understood. I will strictly provide all answers, briefings, and communications exclusively in 100% professional English." }]
       });
 
       // Inject active batch context if available
