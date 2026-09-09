@@ -35,6 +35,8 @@ interface AiCopilotPanelProps {
   allBatches?: Batch[];
   onSelectBatch?: (batch: Batch) => void;
   autoFocusSearch?: boolean;
+  /** Incrementing key to force re-fetch even when the same batch is clicked again */
+  batchLoadKey?: number;
 }
 
 interface ChatMessage {
@@ -48,7 +50,8 @@ export default function AiCopilotPanel({
   onClose,
   allBatches = [],
   onSelectBatch,
-  autoFocusSearch = false
+  autoFocusSearch = false,
+  batchLoadKey = 0
 }: AiCopilotPanelProps) {
   const [activeBatch, setActiveBatch] = useState<Batch | null>(batch);
   const [scheduleData, setScheduleData] = useState<BatchScheduleResponse | null>(null);
@@ -77,13 +80,26 @@ export default function AiCopilotPanel({
   const prevMsgCountRef = useRef<number>(0);
   const dragControls = useDragControls();
 
-  // Synchronize internal activeBatch with incoming batch prop
+  // Synchronize internal activeBatch with incoming batch prop (& force re-load via batchLoadKey)
   useEffect(() => {
+    if (batch) {
+      // Reset all stale state when batch changes from external click
+      setScheduleData(null);
+      setExplanation('');
+      setMessages([]);
+      setSelectedDayFilter('TODAY');
+      setExtraClassDayFilter('ALL');
+      setExpandedNoticeId(null);
+      setCopiedNoticeId(null);
+      setSearchQuery('');
+      setShowSearchDropdown(false);
+      contentScrollRef.current?.scrollTo({ top: 0 });
+    }
     setActiveBatch(batch);
     if (!batch && (autoFocusSearch || window.innerWidth > 768)) {
       searchInputRef.current?.focus();
     }
-  }, [batch, autoFocusSearch]);
+  }, [batch, autoFocusSearch, batchLoadKey]);
 
   // Handle outside clicks to close search dropdown
   useEffect(() => {
@@ -276,7 +292,8 @@ export default function AiCopilotPanel({
     return () => {
       isMounted = false;
     };
-  }, [activeBatch, authToken]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBatch, authToken, batchLoadKey]);
 
   // Scroll internal panel content only when new messages are sent (never scroll outer window/batches)
   useEffect(() => {
@@ -958,6 +975,39 @@ export default function AiCopilotPanel({
           </div>
         ) : (
           <div className="space-y-4">
+
+            {/* Active Batch Banner with Reset */}
+            <div className="flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-[2px] px-3 py-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-600 flex-shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[10px] font-black uppercase tracking-wider text-indigo-700 truncate">
+                    {activeBatch?.displayName || activeBatch?.fullName}
+                  </p>
+                  {activeBatch?.tabName && (
+                    <p className="text-[8px] font-bold text-indigo-500 uppercase tracking-wider">{activeBatch.tabName}</p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveBatch(null);
+                  setScheduleData(null);
+                  setExplanation('');
+                  setMessages([]);
+                  setSelectedDayFilter('TODAY');
+                  setExtraClassDayFilter('ALL');
+                  setExpandedNoticeId(null);
+                  onSelectBatch?.(null as unknown as Batch);
+                  setTimeout(() => searchInputRef.current?.focus(), 100);
+                }}
+                className="px-2 py-1 bg-white hover:bg-indigo-100 border border-indigo-200 text-[9px] font-black uppercase tracking-wider text-indigo-600 rounded-[2px] cursor-pointer transition-colors flex items-center gap-1 flex-shrink-0 shadow-xs"
+              >
+                <Search className="w-3 h-3" />
+                <span>New Search</span>
+              </button>
+            </div>
             
             {/* SECTION 1: LIVE TIMETABLE / SCHEDULE CARD (FROM Raw_DB) */}
             <div className="bg-white rounded-[2px] border border-[#E2E1DA] overflow-hidden shadow-xs">

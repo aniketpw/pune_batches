@@ -185,6 +185,7 @@ export default function App() {
 
   // AI Copilot States
   const [selectedAiBatch, setSelectedAiBatch] = useState<Batch | null>(null);
+  const [aiBatchLoadKey, setAiBatchLoadKey] = useState(0);
   const [showAiCopilot, setShowAiCopilot] = useState(false);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [onlyMyBatches, setOnlyMyBatches] = useState(false);
@@ -717,6 +718,7 @@ export default function App() {
 
   const handleExplainBatch = (batch: Batch) => {
     setSelectedAiBatch(batch);
+    setAiBatchLoadKey(k => k + 1);
     setShowAiCopilot(true);
   };
 
@@ -1685,7 +1687,8 @@ export default function App() {
                     authToken={token}
                     onClose={() => setShowAiCopilot(false)}
                     allBatches={allBatches}
-                    onSelectBatch={(batch) => setSelectedAiBatch(batch)}
+                    onSelectBatch={(batch) => setSelectedAiBatch(batch as Batch | null)}
+                    batchLoadKey={aiBatchLoadKey}
                   />
                 </div>
               </motion.aside>
