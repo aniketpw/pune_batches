@@ -348,17 +348,34 @@ app.use((req, _res, next) => {
     todayDayStr: string,
     nowIst: Date
   ): boolean {
+    const normRowDate = normalizeDateStr(rowDate);
+    const normToday = normalizeDateStr(todayDateStr);
     const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
     const normTodayDay = (todayDayStr || "").trim().toUpperCase().substring(0, 3);
 
-    // In Current Week Time Table, Day of week (e.g. WED matches WED) is the direct match for today
-    if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
-      return true;
+    // 1. If row has an explicit date, compare against today's date
+    if (normRowDate && normToday) {
+      if (normRowDate === normToday || normRowDate.includes(normToday) || normToday.includes(normRowDate)) {
+        return true;
+      }
+      try {
+        const parsed = new Date(rowDate);
+        if (!isNaN(parsed.getTime())) {
+          if (
+            parsed.getDate() === nowIst.getDate() &&
+            parsed.getMonth() === nowIst.getMonth() &&
+            parsed.getFullYear() === nowIst.getFullYear()
+          ) {
+            return true;
+          }
+        }
+      } catch {}
+      // Explicit date is present and does NOT match today -> It is an old past or future date!
+      return false;
     }
 
-    const normRowDate = normalizeDateStr(rowDate);
-    const normToday = normalizeDateStr(todayDateStr);
-    if (normRowDate && normToday && (normRowDate.includes(normToday) || normToday.includes(normRowDate))) {
+    // 2. Only if NO date is given in the row, match by recurring Day-of-Week (e.g. WED matches WED)
+    if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
       return true;
     }
 
@@ -402,16 +419,14 @@ app.use((req, _res, next) => {
     const rowBatchCore = extractCoreBatchCode(rowBatch);
     const rowFacultyCore = extractCoreBatchCode(rowBatchFaculty);
 
-    // Exact core match (e.g. AJ253MA === AJ253MA)
+    // Exact core match (e.g. LJE51MP === LJE51MP, AJ253MA === AJ253MA)
     if (targetCore && rowBatchCore && targetCore === rowBatchCore) return true;
     if (targetCore && rowFacultyCore && targetCore === rowFacultyCore) return true;
 
-    // Cleaned string match
+    // Exact cleaned string match (no loose endsWith substring leakage)
     const targetClean = cleanBatchKey(targetBatch);
     const rowBatchClean = cleanBatchKey(rowBatch);
-    if (targetClean && rowBatchClean && (targetClean === rowBatchClean || rowBatchClean.endsWith(targetClean) || targetClean.endsWith(rowBatchClean))) {
-      return true;
-    }
+    if (targetClean && rowBatchClean && targetClean === rowBatchClean) return true;
 
     return false;
   }
@@ -562,6 +577,68 @@ app.use((req, _res, next) => {
     return "";
   }
 
+  function filterCurrentOrLatestWeekLectures(lectures: any[], todayIso: string): any[] {
+    if (!lectures || lectures.length === 0) return [];
+
+    const currentYear = todayIso.substring(0, 4);
+    const dateMap = new Map<any, string>();
+    const isoDates: string[] = [];
+
+    for (const lec of lectures) {
+      if (lec.lectureDate) {
+        const iso = parseDateToIso(lec.lectureDate, currentYear);
+        if (iso) {
+          dateMap.set(lec, iso);
+          if (!isoDates.includes(iso)) isoDates.push(iso);
+        }
+      }
+    }
+
+    if (isoDates.length === 0) return lectures;
+
+    isoDates.sort();
+
+    const [ty, tm, td] = todayIso.split("-").map(Number);
+    const todayObj = new Date(Date.UTC(ty, tm - 1, td, 12, 0, 0));
+    const dayOfWeek = todayObj.getUTCDay();
+    const diffToMon = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monObj = new Date(todayObj.getTime() + diffToMon * 86400000);
+    const sunObj = new Date(monObj.getTime() + 6 * 86400000);
+
+    const monIso = monObj.toISOString().substring(0, 10);
+    const sunIso = sunObj.toISOString().substring(0, 10);
+
+    // 1. If any lectures belong to current week (Monday to Sunday around today), return ONLY current week lectures
+    const currentWeekLectures = lectures.filter((lec) => {
+      const iso = dateMap.get(lec);
+      if (!iso) return true; // keep recurring classes without explicit dates
+      return iso >= monIso && iso <= sunIso;
+    });
+
+    const hasCurrentWeekDates = currentWeekLectures.some((l) => dateMap.has(l));
+    if (hasCurrentWeekDates) {
+      return currentWeekLectures;
+    }
+
+    // 2. Otherwise pick the latest week available in the sheet
+    const latestIso = isoDates[isoDates.length - 1];
+    const [ly, lm, ld] = latestIso.split("-").map(Number);
+    const latestObj = new Date(Date.UTC(ly, lm - 1, ld, 12, 0, 0));
+    const lDay = latestObj.getUTCDay();
+    const lDiffToMon = lDay === 0 ? -6 : 1 - lDay;
+    const latestMon = new Date(latestObj.getTime() + lDiffToMon * 86400000);
+    const latestSun = new Date(latestMon.getTime() + 6 * 86400000);
+
+    const lMonIso = latestMon.toISOString().substring(0, 10);
+    const lSunIso = latestSun.toISOString().substring(0, 10);
+
+    return lectures.filter((lec) => {
+      const iso = dateMap.get(lec);
+      if (!iso) return true;
+      return iso >= lMonIso && iso <= lSunIso;
+    });
+  }
+
   function deduplicateLectures(lectures: any[]): any[] {
     const seen = new Map<string, any>();
 
@@ -573,13 +650,12 @@ app.use((req, _res, next) => {
     };
 
     for (const lec of lectures) {
-      const cleanBatch = cleanBatchKey(lec.batchCode || lec.batchFaculty || "");
+      const cleanBatch = extractCoreBatchCode(lec.batchCode || lec.batchFaculty || "");
       const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
       const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
-      const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
       
-      // CRITICAL: Slot key MUST include cleanBatch so different batches are never collapsed together!
-      const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}_${cleanFaculty}`;
+      // Each batch can only have ONE lecture in a specific day and time slot!
+      const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}`;
 
       if (!seen.has(slotKey)) {
         seen.set(slotKey, lec);
@@ -597,16 +673,107 @@ app.use((req, _res, next) => {
     return Array.from(seen.values());
   }
 
-  // API: Get Batches and BMs
-  app.get("/api/batches", async (req, res) => {
+  let cachedBmMap: Record<string, string> | null = null;
+  let cachedBmMapTimestamp = 0;
+  const BM_MAP_CACHE_TTL = 15 * 60 * 1000; // 15 minutes TTL
+
+  function parseCSVLine(line: string): string[] {
+    const result: string[] = [];
+    let cur = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        inQuotes = !inQuotes;
+      } else if (c === "," && !inQuotes) {
+        result.push(cur.trim());
+        cur = "";
+      } else {
+        cur += c;
+      }
+    }
+    result.push(cur.trim());
+    return result;
+  }
+
+  async function resolveBmMap(sheets: any, spreadsheetId: string, forceRefresh = false): Promise<Record<string, string>> {
+    if (!forceRefresh && cachedBmMap && Object.keys(cachedBmMap).length > 0 && Date.now() - cachedBmMapTimestamp < BM_MAP_CACHE_TTL) {
+      return cachedBmMap;
+    }
+
+    const bmMap: Record<string, string> = {};
+
+    const registerBm = (batchName: string, bmVal: string) => {
+      if (!batchName || !bmVal) return;
+      const cleanBm = bmVal.replace(/^["'\s]+|["'\s]+$/g, "").trim();
+      if (!cleanBm.includes("@")) return;
+
+      const upperRaw = batchName.trim().toUpperCase().replace(/\s+/g, " ");
+      const stripped = upperRaw
+        .replace(/VIDYAPEETH/gi, "")
+        .replace(/TUITION/gi, "")
+        .replace(/SIP/gi, "")
+        .replace(/\(MERGED\)/gi, "")
+        .trim()
+        .replace(/\s+/g, " ");
+      const core = extractCode(batchName);
+      const coreBatch = extractCoreBatchCode(batchName);
+
+      bmMap[upperRaw] = cleanBm;
+      if (stripped) {
+        bmMap[stripped] = cleanBm;
+        bmMap[`TUITION ${stripped}`] = cleanBm;
+        bmMap[`VIDYAPEETH ${stripped}`] = cleanBm;
+        bmMap[`SIP ${stripped}`] = cleanBm;
+      }
+      if (core) {
+        bmMap[core] = cleanBm;
+      }
+      if (coreBatch) {
+        bmMap[coreBatch] = cleanBm;
+      }
+    };
+
+    // 1. Direct CSV export of 'Ref' tab (GID 1006259505) - 100% reliable, zero quota, instant
     try {
-      const auth = getGoogleAuth(req);
-      const spreadsheetId = (req.query.spreadsheetId as string) || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=1006259505`;
+      const resp = await fetch(csvUrl);
+      if (resp.ok) {
+        const text = await resp.text();
+        const lines = text.split("\n");
+        if (lines.length > 0) {
+          const header = parseCSVLine(lines[0]);
+          let bIdx = -1;
+          let bmIdx = -1;
+          header.forEach((h: string, idx: number) => {
+            const head = (h || "").toLowerCase().trim();
+            if (bIdx === -1 && (head.includes("batch name") || head.includes("batch code") || (head.includes("batch") && !head.includes("status")))) {
+              bIdx = idx;
+            }
+            if (bmIdx === -1 && (head.includes("bm") || head.includes("manager") || head.includes("email"))) {
+              bmIdx = idx;
+            }
+          });
+          if (bIdx === -1) bIdx = 1;
+          if (bmIdx === -1) bmIdx = 3;
 
-      const sheets = google.sheets({ version: "v4", auth });
+          for (let i = 1; i < lines.length; i++) {
+            if (!lines[i].trim()) continue;
+            const cols = parseCSVLine(lines[i]);
+            const rawBatch = (cols[bIdx] || "").trim();
+            const bmVal = (cols[bmIdx] || "").trim();
+            if (rawBatch && bmVal && bmVal.includes("@")) {
+              registerBm(rawBatch, bmVal);
+            }
+          }
+        }
+      }
+    } catch (csvErr: any) {
+      console.warn("[BM Resolver] Direct CSV export failed:", csvErr.message);
+    }
 
-      // Step 1: Resolve Manager (BM) Map from "Ref" sheet
-      const bmMap: Record<string, string> = {};
+    // 2. Fallback to Google Sheets API if CSV was empty
+    if (Object.keys(bmMap).length === 0 && sheets) {
       try {
         const refRes = await sheets.spreadsheets.values.get({
           spreadsheetId,
@@ -614,7 +781,6 @@ app.use((req, _res, next) => {
         });
         const refRows = refRes.data.values || [];
         if (refRows.length > 0) {
-          // Detect columns dynamically from header row
           const refHeader = refRows[0] || [];
           let refBatchIdx = -1;
           let refBmIdx = -1;
@@ -629,46 +795,55 @@ app.use((req, _res, next) => {
             }
           });
 
-          // Fallback to col B (1) and col D (3) if not found
           if (refBatchIdx === -1) refBatchIdx = 1;
           if (refBmIdx === -1) refBmIdx = 3;
 
-          // Skip header row
           for (let i = 1; i < refRows.length; i++) {
-            const rawFullName = refRows[i][refBatchIdx] ? refRows[i][refBatchIdx].toString() : "";
-            // Check refBmIdx first, or fallback to column C (2) or column E (4) if empty
+            const rawFullName = refRows[i][refBatchIdx] ? refRows[i][refBatchIdx].toString().trim() : "";
             let bmVal = refRows[i][refBmIdx] ? refRows[i][refBmIdx].toString().trim() : "";
             if (!bmVal && refRows[i][2]) bmVal = refRows[i][2].toString().trim();
             if (!bmVal && refRows[i][4]) bmVal = refRows[i][4].toString().trim();
 
-            if (rawFullName && bmVal) {
-              const upperRaw = rawFullName.trim().toUpperCase().replace(/\s+/g, " ");
-              const stripped = upperRaw
-                .replace(/VIDYAPEETH/gi, "")
-                .replace(/TUITION/gi, "")
-                .replace(/SIP/gi, "")
-                .replace(/\(MERGED\)/gi, "")
-                .trim()
-                .replace(/\s+/g, " ");
-              const core = extractCode(rawFullName);
-
-              // Register multiple keys so any variation matches
-              bmMap[upperRaw] = bmVal;
-              if (stripped) {
-                bmMap[stripped] = bmVal;
-                bmMap[`TUITION ${stripped}`] = bmVal;
-                bmMap[`VIDYAPEETH ${stripped}`] = bmVal;
-                bmMap[`SIP ${stripped}`] = bmVal;
-              }
-              if (core) {
-                bmMap[core] = bmVal;
-              }
+            if (rawFullName && bmVal && bmVal.includes("@")) {
+              registerBm(rawFullName, bmVal);
             }
           }
         }
       } catch (err: any) {
-        console.warn("Could not read 'Ref' sheet or it is missing:", err.message);
+        console.warn("[BM Resolver] API 'Ref' sheet reading failed:", err.message);
       }
+    }
+
+    // 3. Supplement with BM Names from Extra Class Sheet Cache
+    try {
+      const extraPayload = await fetchAllExtraClassLectures(sheets, false);
+      if (extraPayload && Array.isArray(extraPayload.classes)) {
+        for (const ec of extraPayload.classes) {
+          if (ec.batchCode && ec.bmName && ec.bmName.includes("@")) {
+            registerBm(ec.batchCode, ec.bmName);
+          }
+        }
+      }
+    } catch {}
+
+    if (Object.keys(bmMap).length > 0) {
+      cachedBmMap = bmMap;
+      cachedBmMapTimestamp = Date.now();
+    }
+
+    return bmMap;
+  }
+
+  // API: Get Batches and BMs
+  app.get("/api/batches", async (req, res) => {
+    try {
+      const auth = getGoogleAuth(req);
+      const spreadsheetId = (req.query.spreadsheetId as string) || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+
+      const sheets = google.sheets({ version: "v4", auth });
+
+      // Step 1: Resolve Manager (BM) Map (Cached & Resilient)
+      const bmMap = await resolveBmMap(sheets, spreadsheetId);
 
       // Step 2: Read all tabs to identify target workspaces
       const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
@@ -763,13 +938,27 @@ app.use((req, _res, next) => {
               .trim()
               .replace(/\s+/g, " ");
             const coreKey = extractCode(batchCode);
+            const coreBatch = extractCoreBatchCode(batchCode);
 
-            const bmEmail = 
+            let bmEmail = 
               bmMap[lookupKey] || 
               bmMap[strippedKey] || 
               bmMap[finalDisplayName.toUpperCase()] || 
+              bmMap[cleanCode.toUpperCase()] ||
               bmMap[coreKey] || 
+              (coreBatch ? bmMap[coreBatch] : "") || 
               "";
+
+            // Fallback: check if any cell in this row contains a @pw.live email address
+            if (!bmEmail && Array.isArray(rows[i])) {
+              for (let col = 0; col < rows[i].length; col++) {
+                const cellVal = (rows[i][col] || "").toString().trim();
+                if (cellVal.includes("@pw.live")) {
+                  bmEmail = cellVal;
+                  break;
+                }
+              }
+            }
 
             if (bmEmail) {
               masterBms.add(bmEmail);
@@ -2136,6 +2325,9 @@ app.use((req, _res, next) => {
       }
 
       const { now, dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
+      const currentYearStr = String(now.getFullYear());
+      const todayIso = parseDateToIso(todayDate, currentYearStr) || now.toISOString().substring(0, 10);
+      foundLectures = filterCurrentOrLatestWeekLectures(foundLectures, todayIso);
 
       // Deduplicate foundLectures across Raw_DB and Extra Class sheet
       foundLectures = deduplicateLectures(foundLectures);

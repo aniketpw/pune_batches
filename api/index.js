@@ -267,14 +267,26 @@ function normalizeDateStr(dateStr) {
   return s;
 }
 function isDateOrDayMatchingToday(rowDate, rowDay, todayDateStr, todayDayStr, nowIst) {
-  const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
-  const normTodayDay = (todayDayStr || "").trim().toUpperCase().substring(0, 3);
-  if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
-    return true;
-  }
   const normRowDate = normalizeDateStr(rowDate);
   const normToday = normalizeDateStr(todayDateStr);
-  if (normRowDate && normToday && (normRowDate.includes(normToday) || normToday.includes(normRowDate))) {
+  const normRowDay = (rowDay || "").trim().toUpperCase().substring(0, 3);
+  const normTodayDay = (todayDayStr || "").trim().toUpperCase().substring(0, 3);
+  if (normRowDate && normToday) {
+    if (normRowDate === normToday || normRowDate.includes(normToday) || normToday.includes(normRowDate)) {
+      return true;
+    }
+    try {
+      const parsed = new Date(rowDate);
+      if (!isNaN(parsed.getTime())) {
+        if (parsed.getDate() === nowIst.getDate() && parsed.getMonth() === nowIst.getMonth() && parsed.getFullYear() === nowIst.getFullYear()) {
+          return true;
+        }
+      }
+    } catch {
+    }
+    return false;
+  }
+  if (normRowDay && normTodayDay && normRowDay === normTodayDay) {
     return true;
   }
   return false;
@@ -300,9 +312,7 @@ function isBatchMatch(rowBatch, rowBatchFaculty, targetBatch) {
   if (targetCore && rowFacultyCore && targetCore === rowFacultyCore) return true;
   const targetClean = cleanBatchKey(targetBatch);
   const rowBatchClean = cleanBatchKey(rowBatch);
-  if (targetClean && rowBatchClean && (targetClean === rowBatchClean || rowBatchClean.endsWith(targetClean) || targetClean.endsWith(rowBatchClean))) {
-    return true;
-  }
+  if (targetClean && rowBatchClean && targetClean === rowBatchClean) return true;
   return false;
 }
 function getTeacherNameFromEmail(email) {
@@ -432,6 +442,54 @@ function getSubjectFromFacultyCode(fCode) {
   if (first === "E") return "English";
   return "";
 }
+function filterCurrentOrLatestWeekLectures(lectures, todayIso) {
+  if (!lectures || lectures.length === 0) return [];
+  const currentYear = todayIso.substring(0, 4);
+  const dateMap = /* @__PURE__ */ new Map();
+  const isoDates = [];
+  for (const lec of lectures) {
+    if (lec.lectureDate) {
+      const iso = parseDateToIso(lec.lectureDate, currentYear);
+      if (iso) {
+        dateMap.set(lec, iso);
+        if (!isoDates.includes(iso)) isoDates.push(iso);
+      }
+    }
+  }
+  if (isoDates.length === 0) return lectures;
+  isoDates.sort();
+  const [ty, tm, td] = todayIso.split("-").map(Number);
+  const todayObj = new Date(Date.UTC(ty, tm - 1, td, 12, 0, 0));
+  const dayOfWeek = todayObj.getUTCDay();
+  const diffToMon = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  const monObj = new Date(todayObj.getTime() + diffToMon * 864e5);
+  const sunObj = new Date(monObj.getTime() + 6 * 864e5);
+  const monIso = monObj.toISOString().substring(0, 10);
+  const sunIso = sunObj.toISOString().substring(0, 10);
+  const currentWeekLectures = lectures.filter((lec) => {
+    const iso = dateMap.get(lec);
+    if (!iso) return true;
+    return iso >= monIso && iso <= sunIso;
+  });
+  const hasCurrentWeekDates = currentWeekLectures.some((l) => dateMap.has(l));
+  if (hasCurrentWeekDates) {
+    return currentWeekLectures;
+  }
+  const latestIso = isoDates[isoDates.length - 1];
+  const [ly, lm, ld] = latestIso.split("-").map(Number);
+  const latestObj = new Date(Date.UTC(ly, lm - 1, ld, 12, 0, 0));
+  const lDay = latestObj.getUTCDay();
+  const lDiffToMon = lDay === 0 ? -6 : 1 - lDay;
+  const latestMon = new Date(latestObj.getTime() + lDiffToMon * 864e5);
+  const latestSun = new Date(latestMon.getTime() + 6 * 864e5);
+  const lMonIso = latestMon.toISOString().substring(0, 10);
+  const lSunIso = latestSun.toISOString().substring(0, 10);
+  return lectures.filter((lec) => {
+    const iso = dateMap.get(lec);
+    if (!iso) return true;
+    return iso >= lMonIso && iso <= lSunIso;
+  });
+}
 function deduplicateLectures(lectures) {
   const seen = /* @__PURE__ */ new Map();
   const normalizeTimeKey = (timeStr) => {
@@ -440,11 +498,10 @@ function deduplicateLectures(lectures) {
     return standardized.replace(/[^A-Z0-9]/gi, "").toUpperCase();
   };
   for (const lec of lectures) {
-    const cleanBatch = cleanBatchKey(lec.batchCode || lec.batchFaculty || "");
+    const cleanBatch = extractCoreBatchCode(lec.batchCode || lec.batchFaculty || "");
     const cleanDay = (lec.day || "").trim().toUpperCase().substring(0, 3);
     const cleanTime = normalizeTimeKey(lec.timeRange || `${lec.startTime}-${lec.endTime}`);
-    const cleanFaculty = (lec.facultyCode || "").trim().toUpperCase();
-    const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}_${cleanFaculty}`;
+    const slotKey = `${cleanBatch}_${cleanDay}_${cleanTime}`;
     if (!seen.has(slotKey)) {
       seen.set(slotKey, lec);
     } else {
@@ -458,12 +515,90 @@ function deduplicateLectures(lectures) {
   }
   return Array.from(seen.values());
 }
-app.get("/api/batches", async (req, res) => {
+var cachedBmMap = null;
+var cachedBmMapTimestamp = 0;
+var BM_MAP_CACHE_TTL = 15 * 60 * 1e3;
+function parseCSVLine(line) {
+  const result = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      inQuotes = !inQuotes;
+    } else if (c === "," && !inQuotes) {
+      result.push(cur.trim());
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  result.push(cur.trim());
+  return result;
+}
+async function resolveBmMap(sheets, spreadsheetId, forceRefresh = false) {
+  if (!forceRefresh && cachedBmMap && Object.keys(cachedBmMap).length > 0 && Date.now() - cachedBmMapTimestamp < BM_MAP_CACHE_TTL) {
+    return cachedBmMap;
+  }
+  const bmMap = {};
+  const registerBm = (batchName, bmVal) => {
+    if (!batchName || !bmVal) return;
+    const cleanBm = bmVal.replace(/^["'\s]+|["'\s]+$/g, "").trim();
+    if (!cleanBm.includes("@")) return;
+    const upperRaw = batchName.trim().toUpperCase().replace(/\s+/g, " ");
+    const stripped = upperRaw.replace(/VIDYAPEETH/gi, "").replace(/TUITION/gi, "").replace(/SIP/gi, "").replace(/\(MERGED\)/gi, "").trim().replace(/\s+/g, " ");
+    const core = extractCode(batchName);
+    const coreBatch = extractCoreBatchCode(batchName);
+    bmMap[upperRaw] = cleanBm;
+    if (stripped) {
+      bmMap[stripped] = cleanBm;
+      bmMap[`TUITION ${stripped}`] = cleanBm;
+      bmMap[`VIDYAPEETH ${stripped}`] = cleanBm;
+      bmMap[`SIP ${stripped}`] = cleanBm;
+    }
+    if (core) {
+      bmMap[core] = cleanBm;
+    }
+    if (coreBatch) {
+      bmMap[coreBatch] = cleanBm;
+    }
+  };
   try {
-    const auth = getGoogleAuth(req);
-    const spreadsheetId = req.query.spreadsheetId || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
-    const sheets = google.sheets({ version: "v4", auth });
-    const bmMap = {};
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=1006259505`;
+    const resp = await fetch(csvUrl);
+    if (resp.ok) {
+      const text = await resp.text();
+      const lines = text.split("\n");
+      if (lines.length > 0) {
+        const header = parseCSVLine(lines[0]);
+        let bIdx = -1;
+        let bmIdx = -1;
+        header.forEach((h, idx) => {
+          const head = (h || "").toLowerCase().trim();
+          if (bIdx === -1 && (head.includes("batch name") || head.includes("batch code") || head.includes("batch") && !head.includes("status"))) {
+            bIdx = idx;
+          }
+          if (bmIdx === -1 && (head.includes("bm") || head.includes("manager") || head.includes("email"))) {
+            bmIdx = idx;
+          }
+        });
+        if (bIdx === -1) bIdx = 1;
+        if (bmIdx === -1) bmIdx = 3;
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          const cols = parseCSVLine(lines[i]);
+          const rawBatch = (cols[bIdx] || "").trim();
+          const bmVal = (cols[bmIdx] || "").trim();
+          if (rawBatch && bmVal && bmVal.includes("@")) {
+            registerBm(rawBatch, bmVal);
+          }
+        }
+      }
+    }
+  } catch (csvErr) {
+    console.warn("[BM Resolver] Direct CSV export failed:", csvErr.message);
+  }
+  if (Object.keys(bmMap).length === 0 && sheets) {
     try {
       const refRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -486,30 +621,42 @@ app.get("/api/batches", async (req, res) => {
         if (refBatchIdx === -1) refBatchIdx = 1;
         if (refBmIdx === -1) refBmIdx = 3;
         for (let i = 1; i < refRows.length; i++) {
-          const rawFullName = refRows[i][refBatchIdx] ? refRows[i][refBatchIdx].toString() : "";
+          const rawFullName = refRows[i][refBatchIdx] ? refRows[i][refBatchIdx].toString().trim() : "";
           let bmVal = refRows[i][refBmIdx] ? refRows[i][refBmIdx].toString().trim() : "";
           if (!bmVal && refRows[i][2]) bmVal = refRows[i][2].toString().trim();
           if (!bmVal && refRows[i][4]) bmVal = refRows[i][4].toString().trim();
-          if (rawFullName && bmVal) {
-            const upperRaw = rawFullName.trim().toUpperCase().replace(/\s+/g, " ");
-            const stripped = upperRaw.replace(/VIDYAPEETH/gi, "").replace(/TUITION/gi, "").replace(/SIP/gi, "").replace(/\(MERGED\)/gi, "").trim().replace(/\s+/g, " ");
-            const core = extractCode(rawFullName);
-            bmMap[upperRaw] = bmVal;
-            if (stripped) {
-              bmMap[stripped] = bmVal;
-              bmMap[`TUITION ${stripped}`] = bmVal;
-              bmMap[`VIDYAPEETH ${stripped}`] = bmVal;
-              bmMap[`SIP ${stripped}`] = bmVal;
-            }
-            if (core) {
-              bmMap[core] = bmVal;
-            }
+          if (rawFullName && bmVal && bmVal.includes("@")) {
+            registerBm(rawFullName, bmVal);
           }
         }
       }
     } catch (err) {
-      console.warn("Could not read 'Ref' sheet or it is missing:", err.message);
+      console.warn("[BM Resolver] API 'Ref' sheet reading failed:", err.message);
     }
+  }
+  try {
+    const extraPayload = await fetchAllExtraClassLectures(sheets, false);
+    if (extraPayload && Array.isArray(extraPayload.classes)) {
+      for (const ec of extraPayload.classes) {
+        if (ec.batchCode && ec.bmName && ec.bmName.includes("@")) {
+          registerBm(ec.batchCode, ec.bmName);
+        }
+      }
+    }
+  } catch {
+  }
+  if (Object.keys(bmMap).length > 0) {
+    cachedBmMap = bmMap;
+    cachedBmMapTimestamp = Date.now();
+  }
+  return bmMap;
+}
+app.get("/api/batches", async (req, res) => {
+  try {
+    const auth = getGoogleAuth(req);
+    const spreadsheetId = req.query.spreadsheetId || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+    const sheets = google.sheets({ version: "v4", auth });
+    const bmMap = await resolveBmMap(sheets, spreadsheetId);
     const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
     const sheetsList = metaRes.data.sheets || [];
     const targetTabs = [];
@@ -579,7 +726,17 @@ app.get("/api/batches", async (req, res) => {
           const lookupKey = batchCode.replace(/\s+/g, " ").toUpperCase();
           const strippedKey = lookupKey.replace(/VIDYAPEETH/gi, "").replace(/TUITION/gi, "").replace(/SIP/gi, "").replace(/\(MERGED\)/gi, "").trim().replace(/\s+/g, " ");
           const coreKey = extractCode(batchCode);
-          const bmEmail = bmMap[lookupKey] || bmMap[strippedKey] || bmMap[finalDisplayName.toUpperCase()] || bmMap[coreKey] || "";
+          const coreBatch = extractCoreBatchCode(batchCode);
+          let bmEmail = bmMap[lookupKey] || bmMap[strippedKey] || bmMap[finalDisplayName.toUpperCase()] || bmMap[cleanCode.toUpperCase()] || bmMap[coreKey] || (coreBatch ? bmMap[coreBatch] : "") || "";
+          if (!bmEmail && Array.isArray(rows[i])) {
+            for (let col = 0; col < rows[i].length; col++) {
+              const cellVal = (rows[i][col] || "").toString().trim();
+              if (cellVal.includes("@pw.live")) {
+                bmEmail = cellVal;
+                break;
+              }
+            }
+          }
           if (bmEmail) {
             masterBms.add(bmEmail);
           }
@@ -1716,6 +1873,9 @@ app.get("/api/timetable/batch-schedule", async (req, res) => {
       console.warn("Could not query audit sheet for batch-schedule:", auditErr.message);
     }
     const { now, dateStr: todayDate, dayStr: todayDay } = getIstDateInfo();
+    const currentYearStr = String(now.getFullYear());
+    const todayIso = parseDateToIso(todayDate, currentYearStr) || now.toISOString().substring(0, 10);
+    foundLectures = filterCurrentOrLatestWeekLectures(foundLectures, todayIso);
     foundLectures = deduplicateLectures(foundLectures);
     const dayWeight = {
       MON: 1,
