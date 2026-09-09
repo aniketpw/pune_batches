@@ -18,7 +18,10 @@ import {
   Sparkles, 
   Send,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  Share2,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { ExtraClassScheduleResponse, ExtraLectureItem } from '../types';
 
@@ -44,9 +47,10 @@ export default function ExtraClassView({
   const [selectedCenter, setSelectedCenter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  // Live Updating State for "Mark Done"
+  // Live Updating State for "Mark Done" & WhatsApp Notice Expansion
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [expandedNoticeId, setExpandedNoticeId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -142,7 +146,7 @@ export default function ExtraClassView({
           spreadsheetId: item.spreadsheetId,
           sheetTitle: item.sheetTitle,
           rowIndex: item.rowIndex,
-          statusColLetter: item.statusColLetter || 'M',
+          statusColLetter: item.statusColLetter || 'O',
           status: newStatus,
         }),
       });
@@ -154,8 +158,8 @@ export default function ExtraClassView({
 
       showToast(
         newStatus === 'Done'
-          ? `✓ Marked "${item.batchCode}" as Announced/Done in Google Sheet`
-          : `Marked "${item.batchCode}" back to Pending`
+          ? `✓ Marked "${item.batchCode}" as Announced/Done in Column O`
+          : `Marked "${item.batchCode}" back to Pending in Column O`
       );
     } catch (err: any) {
       console.error('Error marking done:', err);
@@ -166,19 +170,33 @@ export default function ExtraClassView({
     }
   };
 
-  // Handle WhatsApp Copy
+  // Handle WhatsApp Copy (from Column K Announcement)
   const handleCopyAnnouncement = (item: ExtraLectureItem) => {
     let textToCopy = item.announcement;
     if (!textToCopy) {
-      textToCopy = `📢 *Extra Lecture Announcement*\n\n📌 *Batch:* ${item.batchCode}\n📅 *Date:* ${item.displayDate || item.rawDate} (${item.day})\n⏰ *Time:* ${item.timeRange}\n📚 *Subject:* ${item.subject || 'Special Class'}\n👨‍🏫 *Faculty:* ${item.teacherName || item.facultyCode}\n🏢 *Room:* ${item.room}\n\n⚠️ *Mandatory for all students.*`;
+      textToCopy = `Dear Vidyapeeth Students, ${item.teacherName || item.facultyCode} Sir/Ma'am will take ${item.classType || 'Extra Class'} of ${item.subject || 'Special Class'} at (${item.displayDate || item.rawDate}) at (${item.timeRange}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
     }
 
     navigator.clipboard.writeText(textToCopy);
     setCopiedId(item.id);
-    showToast(`Copied WhatsApp Announcement for ${item.batchCode}`);
+    setExpandedNoticeId(item.id);
+    showToast(`Copied Column K Notice for ${item.batchCode}`);
     setTimeout(() => {
       setCopiedId(null);
     }, 2000);
+  };
+
+  // Handle Direct WhatsApp Share
+  const handleShareWhatsApp = (item: ExtraLectureItem) => {
+    let textToShare = item.announcement;
+    if (!textToShare) {
+      textToShare = `Dear Vidyapeeth Students, ${item.teacherName || item.facultyCode} Sir/Ma'am will take ${item.classType || 'Extra Class'} of ${item.subject || 'Special Class'} at (${item.displayDate || item.rawDate}) at (${item.timeRange}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
+    }
+
+    setExpandedNoticeId(item.id);
+    const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(textToShare)}`;
+    window.open(waUrl, '_blank');
+    showToast(`Opening WhatsApp for ${item.batchCode}`);
   };
 
   // Filtered lectures list
@@ -281,7 +299,7 @@ export default function ExtraClassView({
               </span>
             </div>
             <p className="text-[9px] sm:text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-0.5 truncate">
-              PCMC • Hadapsar • Viman Nagar • Kothrud • FC Road • Pimple Saudagar • Online
+              Hadapsar • Viman Nagar • Kothrud • PCMC • FC Road • Osmanabad (Dharashiv - S-SIP) • Pimple Saudagar
             </p>
           </div>
         </div>

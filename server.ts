@@ -1088,31 +1088,57 @@ app.use((req, _res, next) => {
     });
     const allSheets = metaRes.data.sheets || [];
 
-    // Tabs to ignore (not center lecture schedules)
-    const IGNORED_TABS = ['reference', 'sohel', 'osmanabad', 'instructions', 'readme', 'template'];
-    const centerSheets = allSheets.filter((s: any) => {
-      const title = (s.properties?.title || '').trim();
-      if (!title) return false;
-      const lower = title.toLowerCase();
-      return !IGNORED_TABS.some((ign) => lower.includes(ign));
-    });
+    // Allowed 7 Centers as specified by user:
+    // Hadapsar, Viman Nagar, Kothrud, PCMC, FC Road, Osmanabad (Dharashiv - S-SIP), Pimple Saudagar
+    const ALLOWED_EXTRA_CLASS_CENTERS = [
+      'Hadapsar',
+      'Viman Nagar',
+      'Kothrud',
+      'PCMC',
+      'FC Road',
+      'Osmanabad (Dharashiv - S-SIP)',
+      'Pimple Saudagar',
+    ];
 
-    // 2. Concurrently fetch rows from all center sheets
+    function matchAllowedCenter(title: string): string | null {
+      const t = (title || '').trim().toLowerCase();
+      if (t.includes('hadapsar')) return 'Hadapsar';
+      if (t.includes('viman')) return 'Viman Nagar';
+      if (t.includes('kothrud')) return 'Kothrud';
+      if (t.includes('pcmc')) return 'PCMC';
+      if (t.includes('fc road') || t.includes('fcroad')) return 'FC Road';
+      if (t.includes('osmanabad') || t.includes('dharashiv')) return 'Osmanabad (Dharashiv - S-SIP)';
+      if (t.includes('pimple') || t.includes('saudagar')) return 'Pimple Saudagar';
+      return null;
+    }
+
+    const centerSheets = allSheets
+      .map((s: any) => {
+        const rawTitle = (s.properties?.title || '').trim();
+        const centerName = matchAllowedCenter(rawTitle);
+        return {
+          rawSheetTitle: rawTitle,
+          centerName,
+        };
+      })
+      .filter((item: any) => item.centerName !== null);
+
+    // 2. Concurrently fetch rows from the 7 center sheets (Columns A to P to include Col K & Col O)
     const sheetResults = await Promise.all(
-      centerSheets.map(async (sheet: any) => {
-        const sheetTitle = sheet.properties?.title || '';
+      centerSheets.map(async ({ rawSheetTitle, centerName }: any) => {
         try {
           const valuesRes = await sheets.spreadsheets.values.get({
             spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-            range: `'${sheetTitle}'!A1:N`,
+            range: `'${rawSheetTitle}'!A1:P`,
           });
           return {
-            sheetTitle,
+            sheetTitle: rawSheetTitle,
+            centerName,
             rows: valuesRes.data.values || [],
           };
         } catch (e: any) {
-          console.warn(`[Extra Class] Failed to fetch tab '${sheetTitle}':`, e.message);
-          return { sheetTitle, rows: [] };
+          console.warn(`[Extra Class] Failed to fetch tab '${rawSheetTitle}':`, e.message);
+          return { sheetTitle: rawSheetTitle, centerName, rows: [] };
         }
       })
     );
@@ -1148,9 +1174,9 @@ app.use((req, _res, next) => {
     const allLectures: any[] = [];
     const centersFound = new Set<string>();
 
-    for (const { sheetTitle, rows } of sheetResults) {
+    for (const { sheetTitle, centerName, rows } of sheetResults) {
       if (!rows || rows.length === 0) continue;
-      centersFound.add(sheetTitle);
+      centersFound.add(centerName);
 
       let headerRowIdx = 0;
       for (let i = 0; i < Math.min(rows.length, 5); i++) {
@@ -1163,6 +1189,22 @@ app.use((req, _res, next) => {
 
       const headerRow = (rows[headerRowIdx] || []).map((h: any) => String(h || '').trim().toLowerCase());
 
+      // Column Mappings (Google Sheet layout):
+      // Col A (0): Batch code
+      // Col B (1): Day
+      // Col C (2): Date
+      // Col D (3): Faculty Code
+      // Col E (4): In Time
+      // Col F (5): Out Time
+      // Col G (6): Class Test / Doubts
+      // Col H (7): Teacher name
+      // Col I (8): Subject
+      // Col J (9): BM Name
+      // Col K (10): Extra class Announcement
+      // Col L (11): Room
+      // Col M (12): PDF/Video Uploaded
+      // Col N (13): Class Cancel Status
+      // Col O (14): Announcement Status
       let batchCol = 0;
       let dayCol = 1;
       let dateCol = 2;
@@ -1175,7 +1217,7 @@ app.use((req, _res, next) => {
       let bmCol = 9;
       let announcementCol = 10;
       let roomCol = 11;
-      let statusCol = 12;
+      let statusCol = 14; // Default to Column O (Announcement Status)
 
       headerRow.forEach((h: string, idx: number) => {
         if (h.includes('batch')) batchCol = idx;
@@ -1188,9 +1230,16 @@ app.use((req, _res, next) => {
         else if (h.includes('teacher') || (h.includes('faculty') && h.includes('name'))) teacherCol = idx;
         else if (h.includes('subject')) subjectCol = idx;
         else if (h.includes('bm') || h.includes('manager')) bmCol = idx;
-        else if (h.includes('announcement') || h.includes('message')) announcementCol = idx;
         else if (h.includes('room')) roomCol = idx;
-        else if (h.includes('status') || h.includes('done') || h.includes('announced') || h.includes('action')) statusCol = idx;
+
+        // Distinct check for Column K (Announcement message) vs Column O (Announcement Status):
+        if (h.includes('announcement') && h.includes('status')) {
+          statusCol = idx;
+        } else if (h.includes('announcement') || h.includes('message')) {
+          announcementCol = idx;
+        } else if (h.includes('status') && !h.includes('cancel')) {
+          statusCol = idx;
+        }
       });
 
       const statusColLetter = indexToColLetter(statusCol);
@@ -1215,8 +1264,9 @@ app.use((req, _res, next) => {
         const room = String(row[roomCol] || '').trim();
         const rawStatus = String(row[statusCol] || '').trim();
 
+        // Column O: If rawStatus does NOT say "done", it is PENDING!
         const statusLower = rawStatus.toLowerCase();
-        const isDone = ['done', 'announced', 'yes', 'ok', 'completed', 'true', 'checked', 'sent'].some((s) => statusLower.includes(s));
+        const isDone = statusLower === 'done' || statusLower.startsWith('done') || statusLower.includes('done');
 
         const isoDate = parseDateToIso(rawDate, currentYearStr);
         let displayDate = rawDate;
@@ -1251,8 +1301,9 @@ app.use((req, _res, next) => {
           else if (lowerDate.includes('tomorrow')) isTomorrow = true;
         }
 
+        // Exact Announcement message from Column K, or clean standard format if empty
         if (!announcement) {
-          announcement = `📢 *Extra Lecture Announcement*\n\n📌 *Batch:* ${batchRaw}\n📅 *Date & Day:* ${displayDate || rawDate} (${day || 'Scheduled'})\n⏰ *Time:* ${inTime || 'TBD'} - ${outTime || 'TBD'}\n📚 *Subject:* ${subject || 'Special Lecture'}\n👨‍🏫 *Faculty:* ${teacherName || facultyCode || 'Assigned Faculty'}\n🏢 *Room / Venue:* ${room || 'Assigned Room'}\n\n⚠️ *Mandatory for all enrolled students. Please report on time.*`;
+          announcement = `Dear Vidyapeeth Students, ${teacherName || facultyCode || 'Faculty'} Sir/Ma'am will take ${classType || 'Extra Class'} of ${subject || 'Special Subject'} at (${displayDate || rawDate}) at (${inTime || 'TBD'} to ${outTime || 'TBD'}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
         }
 
         const category = getCategory(batchRaw);
@@ -1263,7 +1314,7 @@ app.use((req, _res, next) => {
           id: `${sheetTitle}_${r + 1}`,
           spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
           sheetTitle,
-          center: sheetTitle,
+          center: centerName,
           rowIndex: r + 1,
           statusColLetter,
           batchCode: batchRaw,
@@ -1302,14 +1353,15 @@ app.use((req, _res, next) => {
     const upcomingCount = allLectures.filter((c) => c.isUpcoming).length;
     const pastCount = allLectures.filter((c) => c.isPast).length;
     const doneCount = allLectures.filter((c) => c.isDone).length;
-    const pendingCount = allLectures.filter((c) => c.isToday && !c.isDone).length;
+    // Pending: any lecture where Column O is NOT done!
+    const pendingCount = allLectures.filter((c) => !c.isDone).length;
 
     const responsePayload = {
       todayDate: todayIstParts,
       tomorrowDate: tomorrowIstParts,
       todayDateDisplay: todayDisplay,
       tomorrowDateDisplay: tomorrowDisplay,
-      centers: Array.from(centersFound),
+      centers: ALLOWED_EXTRA_CLASS_CENTERS,
       classes: allLectures,
       counts: {
         today: todayCount,
@@ -1828,7 +1880,7 @@ app.use((req, _res, next) => {
       const sheets = google.sheets({ version: "v4", auth });
 
       const targetSheetId = spreadsheetId || EXTRA_CLASS_SPREADSHEET_ID;
-      const col = statusColLetter || "M";
+      const col = statusColLetter || "O";
       const range = `'${sheetTitle}'!${col}${rowIndex}`;
 
       const newStatus = status !== undefined ? String(status) : "Done";
@@ -1867,6 +1919,22 @@ app.use((req, _res, next) => {
   // ==========================================
   const AUDIT_SPREADSHEET_ID = "1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k";
   const auditSheetCache = new Map<string, { data: any; timestamp: number }>();
+
+  function isPuneBatchCode(str: string): boolean {
+    if (!str) return false;
+    const clean = str.trim().toUpperCase();
+    return (
+      clean.startsWith("27-") ||
+      clean.startsWith("T27") ||
+      clean.startsWith("T-27") ||
+      clean.startsWith("27 -") ||
+      clean.includes("27-") ||
+      clean.includes("T27") ||
+      clean.includes("T-27") ||
+      clean.includes("27 -") ||
+      /\b(27-|T27)/i.test(clean)
+    );
+  }
 
   function isPuneBranch(branch: string): boolean {
     if (!branch) return false;
@@ -1995,20 +2063,42 @@ app.use((req, _res, next) => {
           const row = rows[r] || [];
           if (row.length === 0) continue;
 
-          const rawBranch = String(row[branchIdx] || "").trim();
-          const rawBatch = String(row[batchIdx] || "").trim();
+          let rawBranch = String(row[branchIdx] || "").trim();
+          let rawBatch = String(row[batchIdx] || "").trim();
 
           if (!rawBranch && !rawBatch) continue;
 
           // Header repeated check
           if (rawBranch.toLowerCase().includes("branch") && rawBatch.toLowerCase().includes("batch")) continue;
 
-          // CRITICAL REQUIREMENT: Filter ONLY Pune Branches
-          if (!isPuneBranch(rawBranch)) {
+          // CRITICAL REQUIREMENT: User specified ONLY batch codes with "T27" and "27-"
+          let finalBatchName = isPuneBatchCode(rawBatch) ? rawBatch : "";
+
+          if (!finalBatchName) {
+            // Check if batch code was located in any other column of this row
+            for (let c = 0; c < row.length; c++) {
+              const cellStr = String(row[c] || "").trim();
+              if (isPuneBatchCode(cellStr)) {
+                finalBatchName = cellStr;
+                break;
+              }
+            }
+          }
+
+          // STRICT FILTER: If code does NOT have T27 or 27-, SKIP this row!
+          if (!finalBatchName) {
             continue;
           }
 
-          const normalizedBranch = normalizePuneBranchName(rawBranch);
+          let normalizedBranch = "";
+          const batchUpper = finalBatchName.toUpperCase();
+          if (batchUpper.startsWith("T27") || batchUpper.includes("T27")) {
+            normalizedBranch = "TC";
+          } else if (rawBranch && rawBranch.toLowerCase() !== "pune") {
+            normalizedBranch = normalizePuneBranchName(rawBranch);
+          } else {
+            normalizedBranch = "Pune Center";
+          }
           branchesSet.add(normalizedBranch);
 
           const rawSubject = subjectIdx >= 0 ? String(row[subjectIdx] || "").trim() : "";
@@ -2029,7 +2119,7 @@ app.use((req, _res, next) => {
             id: `${sheetTitle}_${r + 1}`,
             subsheet: sheetTitle,
             branch: normalizedBranch,
-            batchName: rawBatch,
+            batchName: finalBatchName,
             subjectName: rawSubject,
             lecStartTime: rawTime,
             finalBm: rawBm,

@@ -847,28 +847,49 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
     spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID
   });
   const allSheets = metaRes.data.sheets || [];
-  const IGNORED_TABS = ["reference", "sohel", "osmanabad", "instructions", "readme", "template"];
-  const centerSheets = allSheets.filter((s) => {
-    const title = (s.properties?.title || "").trim();
-    if (!title) return false;
-    const lower = title.toLowerCase();
-    return !IGNORED_TABS.some((ign) => lower.includes(ign));
-  });
+  const ALLOWED_EXTRA_CLASS_CENTERS = [
+    "Hadapsar",
+    "Viman Nagar",
+    "Kothrud",
+    "PCMC",
+    "FC Road",
+    "Osmanabad (Dharashiv - S-SIP)",
+    "Pimple Saudagar"
+  ];
+  function matchAllowedCenter(title) {
+    const t = (title || "").trim().toLowerCase();
+    if (t.includes("hadapsar")) return "Hadapsar";
+    if (t.includes("viman")) return "Viman Nagar";
+    if (t.includes("kothrud")) return "Kothrud";
+    if (t.includes("pcmc")) return "PCMC";
+    if (t.includes("fc road") || t.includes("fcroad")) return "FC Road";
+    if (t.includes("osmanabad") || t.includes("dharashiv")) return "Osmanabad (Dharashiv - S-SIP)";
+    if (t.includes("pimple") || t.includes("saudagar")) return "Pimple Saudagar";
+    return null;
+  }
+  const centerSheets = allSheets.map((s) => {
+    const rawTitle = (s.properties?.title || "").trim();
+    const centerName = matchAllowedCenter(rawTitle);
+    return {
+      rawSheetTitle: rawTitle,
+      centerName
+    };
+  }).filter((item) => item.centerName !== null);
   const sheetResults = await Promise.all(
-    centerSheets.map(async (sheet) => {
-      const sheetTitle = sheet.properties?.title || "";
+    centerSheets.map(async ({ rawSheetTitle, centerName }) => {
       try {
         const valuesRes = await sheets.spreadsheets.values.get({
           spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
-          range: `'${sheetTitle}'!A1:N`
+          range: `'${rawSheetTitle}'!A1:P`
         });
         return {
-          sheetTitle,
+          sheetTitle: rawSheetTitle,
+          centerName,
           rows: valuesRes.data.values || []
         };
       } catch (e) {
-        console.warn(`[Extra Class] Failed to fetch tab '${sheetTitle}':`, e.message);
-        return { sheetTitle, rows: [] };
+        console.warn(`[Extra Class] Failed to fetch tab '${rawSheetTitle}':`, e.message);
+        return { sheetTitle: rawSheetTitle, centerName, rows: [] };
       }
     })
   );
@@ -896,9 +917,9 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
   const tomorrowDisplay = formatIsoDisplay(tomorrowIstParts);
   const allLectures = [];
   const centersFound = /* @__PURE__ */ new Set();
-  for (const { sheetTitle, rows } of sheetResults) {
+  for (const { sheetTitle, centerName, rows } of sheetResults) {
     if (!rows || rows.length === 0) continue;
-    centersFound.add(sheetTitle);
+    centersFound.add(centerName);
     let headerRowIdx = 0;
     for (let i = 0; i < Math.min(rows.length, 5); i++) {
       const nonEmpty = (rows[i] || []).filter((c) => String(c || "").trim() !== "");
@@ -920,7 +941,7 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
     let bmCol = 9;
     let announcementCol = 10;
     let roomCol = 11;
-    let statusCol = 12;
+    let statusCol = 14;
     headerRow.forEach((h, idx) => {
       if (h.includes("batch")) batchCol = idx;
       else if (h.includes("day")) dayCol = idx;
@@ -932,9 +953,14 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
       else if (h.includes("teacher") || h.includes("faculty") && h.includes("name")) teacherCol = idx;
       else if (h.includes("subject")) subjectCol = idx;
       else if (h.includes("bm") || h.includes("manager")) bmCol = idx;
-      else if (h.includes("announcement") || h.includes("message")) announcementCol = idx;
       else if (h.includes("room")) roomCol = idx;
-      else if (h.includes("status") || h.includes("done") || h.includes("announced") || h.includes("action")) statusCol = idx;
+      if (h.includes("announcement") && h.includes("status")) {
+        statusCol = idx;
+      } else if (h.includes("announcement") || h.includes("message")) {
+        announcementCol = idx;
+      } else if (h.includes("status") && !h.includes("cancel")) {
+        statusCol = idx;
+      }
     });
     const statusColLetter = indexToColLetter(statusCol);
     for (let r = headerRowIdx + 1; r < rows.length; r++) {
@@ -955,7 +981,7 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
       const room = String(row[roomCol] || "").trim();
       const rawStatus = String(row[statusCol] || "").trim();
       const statusLower = rawStatus.toLowerCase();
-      const isDone = ["done", "announced", "yes", "ok", "completed", "true", "checked", "sent"].some((s) => statusLower.includes(s));
+      const isDone = statusLower === "done" || statusLower.startsWith("done") || statusLower.includes("done");
       const isoDate = parseDateToIso(rawDate, currentYearStr);
       let displayDate = rawDate;
       let isToday = false;
@@ -987,16 +1013,7 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
         else if (lowerDate.includes("tomorrow")) isTomorrow = true;
       }
       if (!announcement) {
-        announcement = `\u{1F4E2} *Extra Lecture Announcement*
-
-\u{1F4CC} *Batch:* ${batchRaw}
-\u{1F4C5} *Date & Day:* ${displayDate || rawDate} (${day || "Scheduled"})
-\u23F0 *Time:* ${inTime || "TBD"} - ${outTime || "TBD"}
-\u{1F4DA} *Subject:* ${subject || "Special Lecture"}
-\u{1F468}\u200D\u{1F3EB} *Faculty:* ${teacherName || facultyCode || "Assigned Faculty"}
-\u{1F3E2} *Room / Venue:* ${room || "Assigned Room"}
-
-\u26A0\uFE0F *Mandatory for all enrolled students. Please report on time.*`;
+        announcement = `Dear Vidyapeeth Students, ${teacherName || facultyCode || "Faculty"} Sir/Ma'am will take ${classType || "Extra Class"} of ${subject || "Special Subject"} at (${displayDate || rawDate}) at (${inTime || "TBD"} to ${outTime || "TBD"}). Don't forget to join! Keep studying! Physics Wallah is for you, by you, from you!`;
       }
       const category = getCategory(batchRaw);
       const phase = getPhase(batchRaw);
@@ -1005,7 +1022,7 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
         id: `${sheetTitle}_${r + 1}`,
         spreadsheetId: EXTRA_CLASS_SPREADSHEET_ID,
         sheetTitle,
-        center: sheetTitle,
+        center: centerName,
         rowIndex: r + 1,
         statusColLetter,
         batchCode: batchRaw,
@@ -1041,13 +1058,13 @@ async function fetchAllExtraClassLectures(sheets, forceRefresh = false) {
   const upcomingCount = allLectures.filter((c) => c.isUpcoming).length;
   const pastCount = allLectures.filter((c) => c.isPast).length;
   const doneCount = allLectures.filter((c) => c.isDone).length;
-  const pendingCount = allLectures.filter((c) => c.isToday && !c.isDone).length;
+  const pendingCount = allLectures.filter((c) => !c.isDone).length;
   const responsePayload = {
     todayDate: todayIstParts,
     tomorrowDate: tomorrowIstParts,
     todayDateDisplay: todayDisplay,
     tomorrowDateDisplay: tomorrowDisplay,
-    centers: Array.from(centersFound),
+    centers: ALLOWED_EXTRA_CLASS_CENTERS,
     classes: allLectures,
     counts: {
       today: todayCount,
@@ -1488,7 +1505,7 @@ app.post("/api/extra-classes/mark-done", async (req, res) => {
     const auth = getGoogleAuth(req);
     const sheets = google.sheets({ version: "v4", auth });
     const targetSheetId = spreadsheetId || EXTRA_CLASS_SPREADSHEET_ID;
-    const col = statusColLetter || "M";
+    const col = statusColLetter || "O";
     const range = `'${sheetTitle}'!${col}${rowIndex}`;
     const newStatus = status !== void 0 ? String(status) : "Done";
     await sheets.spreadsheets.values.update({
@@ -1514,26 +1531,10 @@ app.post("/api/extra-classes/mark-done", async (req, res) => {
 });
 var AUDIT_SPREADSHEET_ID = "1ZXz1LySgzYL06gNbM7N8jCbnTOyVGiHQ0I596F-Sq_k";
 var auditSheetCache = /* @__PURE__ */ new Map();
-function isPuneBranch(branch) {
-  if (!branch) return false;
-  const b = branch.toLowerCase().trim().replace(/[^a-z0-9]/g, " ");
-  const puneKeywords = [
-    "pcmc",
-    "pimpri",
-    "hadapsar",
-    "viman",
-    "vimannagar",
-    "fc",
-    "fcroad",
-    "fergusson",
-    "kothrud",
-    "kothurd",
-    "tc",
-    "tuition",
-    "pune"
-  ];
-  const tokens = b.split(/\s+/).filter(Boolean);
-  return puneKeywords.some((kw) => b.includes(kw) || tokens.includes(kw));
+function isPuneBatchCode(str) {
+  if (!str) return false;
+  const clean = str.trim().toUpperCase();
+  return clean.startsWith("27-") || clean.startsWith("T27") || clean.startsWith("T-27") || clean.startsWith("27 -") || clean.includes("27-") || clean.includes("T27") || clean.includes("T-27") || clean.includes("27 -") || /\b(27-|T27)/i.test(clean);
 }
 function normalizePuneBranchName(branch) {
   const b = (branch || "").trim();
@@ -1628,14 +1629,32 @@ app.get("/api/audit-sheet", async (req, res) => {
       for (let r = headerRowIndex + 1; r < rows.length; r++) {
         const row = rows[r] || [];
         if (row.length === 0) continue;
-        const rawBranch = String(row[branchIdx] || "").trim();
-        const rawBatch = String(row[batchIdx] || "").trim();
+        let rawBranch = String(row[branchIdx] || "").trim();
+        let rawBatch = String(row[batchIdx] || "").trim();
         if (!rawBranch && !rawBatch) continue;
         if (rawBranch.toLowerCase().includes("branch") && rawBatch.toLowerCase().includes("batch")) continue;
-        if (!isPuneBranch(rawBranch)) {
+        let finalBatchName = isPuneBatchCode(rawBatch) ? rawBatch : "";
+        if (!finalBatchName) {
+          for (let c = 0; c < row.length; c++) {
+            const cellStr = String(row[c] || "").trim();
+            if (isPuneBatchCode(cellStr)) {
+              finalBatchName = cellStr;
+              break;
+            }
+          }
+        }
+        if (!finalBatchName) {
           continue;
         }
-        const normalizedBranch = normalizePuneBranchName(rawBranch);
+        let normalizedBranch = "";
+        const batchUpper = finalBatchName.toUpperCase();
+        if (batchUpper.startsWith("T27") || batchUpper.includes("T27")) {
+          normalizedBranch = "TC";
+        } else if (rawBranch && rawBranch.toLowerCase() !== "pune") {
+          normalizedBranch = normalizePuneBranchName(rawBranch);
+        } else {
+          normalizedBranch = "Pune Center";
+        }
         branchesSet.add(normalizedBranch);
         const rawSubject = subjectIdx >= 0 ? String(row[subjectIdx] || "").trim() : "";
         const rawTime = timeIdx >= 0 ? String(row[timeIdx] || "").trim() : "";
@@ -1651,7 +1670,7 @@ app.get("/api/audit-sheet", async (req, res) => {
           id: `${sheetTitle}_${r + 1}`,
           subsheet: sheetTitle,
           branch: normalizedBranch,
-          batchName: rawBatch,
+          batchName: finalBatchName,
           subjectName: rawSubject,
           lecStartTime: rawTime,
           finalBm: rawBm,

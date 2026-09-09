@@ -32,6 +32,23 @@ interface AuditSheetViewProps {
 
 type ErrorFilterType = 'ALL' | 'ERRORS_ONLY' | 'CLEAN_ONLY';
 
+// Checks if batch code has 27- or T27 (Pune Vidyapeeth & Tuition Centers)
+function isPuneBatchCode(str: string): boolean {
+  if (!str) return false;
+  const clean = str.trim().toUpperCase();
+  return (
+    clean.startsWith('27-') ||
+    clean.startsWith('T27') ||
+    clean.startsWith('T-27') ||
+    clean.startsWith('27 -') ||
+    clean.includes('27-') ||
+    clean.includes('T27') ||
+    clean.includes('T-27') ||
+    clean.includes('27 -') ||
+    /\b(27-|T27)/i.test(clean)
+  );
+}
+
 export default function AuditSheetView({
   authToken,
   onBackToBatches,
@@ -113,6 +130,11 @@ export default function AuditSheetView({
     if (!data?.records) return [];
 
     return data.records.filter((rec) => {
+      // 0. STRICT REQUIREMENT: Only batch codes containing/starting with "27-" or "T27"
+      if (!isPuneBatchCode(rec.batchName)) {
+        return false;
+      }
+
       // 1. Subsheet Filter
       if (selectedSubsheet !== 'ALL') {
         const targetLower = selectedSubsheet.toLowerCase();
@@ -171,9 +193,10 @@ export default function AuditSheetView({
   // Subsheet counts map
   const subsheetCounts = useMemo(() => {
     if (!data?.records) return {} as Record<string, number>;
-    const counts: Record<string, number> = { ALL: data.records.length };
+    const validRecords = data.records.filter(r => isPuneBatchCode(r.batchName));
+    const counts: Record<string, number> = { ALL: validRecords.length };
     
-    data.records.forEach(r => {
+    validRecords.forEach(r => {
       const sheet = (r.subsheet || '').toLowerCase();
       availableSubsheets.forEach(sub => {
         if (sheet.includes(sub.toLowerCase())) {
@@ -283,12 +306,15 @@ export default function AuditSheetView({
               <span className="px-2 py-0.5 rounded-[2px] text-[9px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-200">
                 Pune Centers Only
               </span>
+              <span className="px-2 py-0.5 rounded-[2px] text-[9px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-300">
+                27- & T27 Batches Only
+              </span>
               <span className="px-2 py-0.5 rounded-[2px] text-[9px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200">
                 6 Subsheets Active
               </span>
             </div>
             <p className="text-[11px] text-slate-500 font-medium truncate mt-0.5">
-              Academic, notes, video & teacher audit filtered strictly for Pune branches
+              Academic, notes, video & teacher audit filtered strictly for 27- and T27 Pune batch codes
             </p>
           </div>
         </div>
