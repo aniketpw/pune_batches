@@ -199,20 +199,13 @@ export default function App() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Bulletproof background scroll lock when mobile AI sheet or modal is open
+  // Clean background scroll lock when mobile AI sheet or modal is open (without layout reflow or click suppression)
   useEffect(() => {
-    let lockedScrollY = 0;
     let isLocked = false;
 
     const lockScroll = () => {
       if (isLocked) return;
-      lockedScrollY = window.scrollY;
       isLocked = true;
-      document.body.style.position = 'fixed';
-      document.body.style.top = `-${lockedScrollY}px`;
-      document.body.style.left = '0';
-      document.body.style.right = '0';
-      document.body.style.width = '100%';
       document.body.style.overflow = 'hidden';
       document.body.style.overscrollBehavior = 'none';
       document.documentElement.style.overflow = 'hidden';
@@ -222,16 +215,10 @@ export default function App() {
     const unlockScroll = () => {
       if (!isLocked) return;
       isLocked = false;
-      document.body.style.position = '';
-      document.body.style.top = '';
-      document.body.style.left = '';
-      document.body.style.right = '';
-      document.body.style.width = '';
       document.body.style.overflow = '';
       document.body.style.overscrollBehavior = '';
       document.documentElement.style.overflow = '';
       document.documentElement.style.overscrollBehavior = '';
-      window.scrollTo(0, lockedScrollY);
     };
 
     const handleCheckLock = () => {
@@ -793,7 +780,7 @@ export default function App() {
                 setShowAiCopilot(true);
               }
             }}
-            className={`hidden lg:flex p-2 rounded-[2px] border transition-all cursor-pointer items-center gap-1.5 ${
+            className={`hidden lg:flex p-2 rounded-[2px] border transition-all cursor-pointer items-center gap-1.5 touch-manipulation ${
               showAiCopilot 
                 ? 'bg-indigo-600 text-white border-indigo-600 text-[10px] font-black uppercase tracking-wider shadow-xs' 
                 : 'bg-white hover:bg-slate-50 text-slate-700 border-[#E2E1DA] text-[10px] font-bold uppercase tracking-wider'
@@ -1676,7 +1663,8 @@ export default function App() {
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
+                exit={{ opacity: 0, pointerEvents: 'none' }}
+                transition={{ duration: 0.15 }}
                 onClick={handleCloseAiCopilot}
                 onTouchMove={(e) => {
                   e.preventDefault();
@@ -1690,8 +1678,8 @@ export default function App() {
               <motion.aside
                 initial={{ opacity: 0, y: '100%' }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: '100%' }}
-                transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                exit={{ opacity: 0, y: '100%', pointerEvents: 'none' }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
                 className="fixed inset-x-0 bottom-0 z-50 max-h-[76vh] sm:max-h-[82vh] flex flex-col items-center justify-end p-0 sm:p-3 lg:p-0 lg:static lg:z-auto lg:inset-auto lg:max-h-[calc(100vh-120px)] lg:w-auto lg:sticky lg:top-[90px] flex-shrink-0 overscroll-contain"
               >
                 <div className="w-full sm:max-w-lg lg:max-w-none flex flex-col h-[74vh] sm:h-[80vh] lg:h-[780px]">
@@ -1710,22 +1698,24 @@ export default function App() {
         </AnimatePresence>
 
         {/* Floating Transparent Side Action Button (Mobile FAB on bottom-right) */}
-        {!showAiCopilot && (
-          <div className="fixed bottom-6 right-4 z-40 lg:hidden animate-in fade-in zoom-in-90 duration-200">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedAiBatch(null);
-                setAiBatchLoadKey(k => k + 1);
-                setShowAiCopilot(true);
-              }}
-              className="w-12 h-12 rounded-full bg-white/90 hover:bg-white text-indigo-600 border border-indigo-200/90 shadow-xl shadow-indigo-950/15 backdrop-blur-md flex items-center justify-center active:scale-90 transition-all cursor-pointer group relative"
-              title="Open AI Timetable & Schedule Search"
-            >
-              <Sparkles className="w-5.5 h-5.5 text-indigo-600 fill-indigo-100 group-hover:scale-110 transition-transform" />
-            </button>
-          </div>
-        )}
+        <div 
+          className={`fixed bottom-6 right-4 z-50 lg:hidden transition-all duration-200 ${
+            showAiCopilot ? 'opacity-0 pointer-events-none scale-75' : 'opacity-100 pointer-events-auto scale-100'
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedAiBatch(null);
+              setAiBatchLoadKey(k => k + 1);
+              setShowAiCopilot(true);
+            }}
+            className="w-12 h-12 rounded-full bg-white/90 hover:bg-white text-indigo-600 border border-indigo-200/90 shadow-xl shadow-indigo-950/15 backdrop-blur-md flex items-center justify-center active:scale-90 transition-all cursor-pointer group relative touch-manipulation"
+            title="Open AI Timetable & Schedule Search"
+          >
+            <Sparkles className="w-5.5 h-5.5 text-indigo-600 fill-indigo-100 group-hover:scale-110 transition-transform" />
+          </button>
+        </div>
 
         {/* Floating Back to Top Button */}
         {showScrollTop && (

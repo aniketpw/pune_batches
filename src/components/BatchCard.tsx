@@ -196,7 +196,7 @@ export default function BatchCard({ batch, onEdit, onScan, onExplain }: BatchCar
               e.preventDefault();
               onExplain(batch);
             }}
-            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 text-indigo-700 rounded-[2px] border border-indigo-200 flex items-center justify-center gap-1.5 transition-all cursor-pointer uppercase tracking-wider group/aidecode shadow-xs active:scale-95"
+            className="w-full lg:w-auto px-2 sm:px-3 py-2.5 sm:py-2 text-[11px] sm:text-xs font-black bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 text-indigo-700 rounded-[2px] border border-indigo-200 flex items-center justify-center gap-1.5 transition-all cursor-pointer uppercase tracking-wider group/aidecode shadow-xs active:scale-95 touch-manipulation"
             title="View Today's Schedule & AI Decode (Raw_DB)"
             id={`ai-decode-btn-${batch.rowIndex}`}
           >
