@@ -3,6 +3,7 @@ import path from "path";
 import { google } from "googleapis";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { SEED_BM_MAP } from "./src/seedBmMap.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -226,8 +227,16 @@ app.use((req, _res, next) => {
         if (matchTab?.properties?.title) {
           targetSheetTitle = matchTab.properties.title;
         } else {
-          // Priority 2: Match tab named timetable
-          const ttTab = sheetsList.find((s: any) => (s.properties?.title || "").trim().toLowerCase().includes("timetable"));
+          // Priority 2: Match tab named Current Week Time Table, Time Table, or Schedule
+          const ttTab = sheetsList.find((s: any) => {
+            const t = (s.properties?.title || "").trim().toLowerCase();
+            return (
+              t.includes("current week") ||
+              (t.includes("time") && t.includes("table")) ||
+              t.includes("timetable") ||
+              t.includes("schedule")
+            );
+          });
           if (ttTab?.properties?.title) {
             targetSheetTitle = ttTab.properties.title;
           } else if (sheetsList[0]?.properties?.title) {
@@ -239,20 +248,20 @@ app.use((req, _res, next) => {
       console.warn(`Could not get metadata for ${spreadsheetId}:`, metaErr.message);
     }
 
-    // Fetch all rows in columns A to AL without the 1000 row truncation cap
+    // Fetch all rows in columns A to AZ (ensures Subject and Teacher Email in Col AI/AK are never truncated)
     let rows: any[][] = [];
     try {
       const valuesRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: `'${targetSheetTitle}'!A:AL`,
+        range: `'${targetSheetTitle}'!A:AZ`,
       });
       rows = valuesRes.data?.values || [];
     } catch (valErr: any) {
-      console.warn(`Failed to fetch '${targetSheetTitle}'!A:AL for ${spreadsheetId}:`, valErr.message);
+      console.warn(`Failed to fetch '${targetSheetTitle}'!A:AZ for ${spreadsheetId}:`, valErr.message);
       try {
         const fallbackRes = await sheets.spreadsheets.values.get({
           spreadsheetId,
-          range: `'${targetSheetTitle}'!A1:AL5000`,
+          range: `'${targetSheetTitle}'!A1:AZ5000`,
         });
         rows = fallbackRes.data?.values || [];
       } catch (fbErr: any) {
@@ -673,8 +682,8 @@ app.use((req, _res, next) => {
     return Array.from(seen.values());
   }
 
-  let cachedBmMap: Record<string, string> | null = null;
-  let cachedBmMapTimestamp = 0;
+  let cachedBmMap: Record<string, string> = { ...SEED_BM_MAP };
+  let cachedBmMapTimestamp = Date.now();
   const BM_MAP_CACHE_TTL = 15 * 60 * 1000; // 15 minutes TTL
 
   function parseCSVLine(line: string): string[] {
@@ -696,12 +705,8 @@ app.use((req, _res, next) => {
     return result;
   }
 
-  async function resolveBmMap(sheets: any, spreadsheetId: string, forceRefresh = false): Promise<Record<string, string>> {
-    if (!forceRefresh && cachedBmMap && Object.keys(cachedBmMap).length > 0 && Date.now() - cachedBmMapTimestamp < BM_MAP_CACHE_TTL) {
-      return cachedBmMap;
-    }
-
-    const bmMap: Record<string, string> = {};
+  async function resolveBmMap(sheets: any, spreadsheetId: string, authToken?: string, forceRefresh = false): Promise<Record<string, string>> {
+    const bmMap: Record<string, string> = { ...SEED_BM_MAP, ...(cachedBmMap || {}) };
 
     const registerBm = (batchName: string, bmVal: string) => {
       if (!batchName || !bmVal) return;
@@ -737,7 +742,11 @@ app.use((req, _res, next) => {
     // 1. Direct CSV export of 'Ref' tab (GID 1006259505) - 100% reliable, zero quota, instant
     try {
       const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=1006259505`;
-      const resp = await fetch(csvUrl);
+      const fetchHeaders: Record<string, string> = {};
+      if (authToken) {
+        fetchHeaders["Authorization"] = `Bearer ${authToken}`;
+      }
+      const resp = await fetch(csvUrl, { headers: fetchHeaders });
       if (resp.ok) {
         const text = await resp.text();
         const lines = text.split("\n");
@@ -839,11 +848,12 @@ app.use((req, _res, next) => {
     try {
       const auth = getGoogleAuth(req);
       const spreadsheetId = (req.query.spreadsheetId as string) || "1-OYeCl3SME14Jjk1CCxRAAho_jrvgji63fFunLZvKiM";
+      const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
 
       const sheets = google.sheets({ version: "v4", auth });
 
-      // Step 1: Resolve Manager (BM) Map (Cached & Resilient)
-      const bmMap = await resolveBmMap(sheets, spreadsheetId);
+      // Step 1: Resolve Manager (BM) Map (Cached & Resilient with Infallible Seed Baseline)
+      const bmMap = await resolveBmMap(sheets, spreadsheetId, token);
 
       // Step 2: Read all tabs to identify target workspaces
       const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
@@ -2213,7 +2223,7 @@ app.use((req, _res, next) => {
       try {
         const extraPayload = await fetchAllExtraClassLectures(sheets, forceRefresh);
         const allMatchingExtra = (extraPayload.classes || []).filter((ec: any) =>
-          isBatchMatch(ec.batchCode, ec.facultyCode, batchCode)
+          isBatchMatch(ec.batchCode, "", batchCode)
         );
 
         // Filter strictly to Yesterday, Today, and Tomorrow (discarding all old historical classes like August 2025)
@@ -2261,40 +2271,6 @@ app.use((req, _res, next) => {
             dateTag,
           };
         });
-
-        // Also add recent extra classes (Yesterday, Today, Tomorrow) into foundLectures preview
-        const recentExtra = relevantExtra;
-        if (recentExtra.length > 0) {
-          const { now } = getIstDateInfo();
-          for (const ec of recentExtra) {
-            const extraLecture = {
-              day: ec.day || "Scheduled",
-              lectureDate: ec.displayDate || ec.rawDate || "",
-              startTime: ec.inTime || "",
-              endTime: ec.outTime || "",
-              timeRange: ec.timeRange || (ec.inTime && ec.outTime ? `${ec.inTime} - ${ec.outTime}` : "Extra Class"),
-              batchFaculty: `${ec.batchCode} -/- ${ec.facultyCode || ec.teacherName || "Faculty"}`,
-              batchCode: ec.batchCode,
-              facultyCode: ec.facultyCode || "",
-              subject: ec.subject || "Special Lecture",
-              teacherEmail: ec.bmName || "",
-              teacherName: ec.teacherName || "",
-              room: ec.room || "",
-              announcement: ec.announcement || "",
-              isToday: !!ec.isToday,
-              isExtraClass: true,
-              status: computeLectureStatus(ec.inTime, ec.outTime, !!ec.isToday, now),
-              rowIndex: ec.rowIndex,
-            };
-            foundLectures.push(extraLecture);
-          }
-          if (!resolvedCenter && recentExtra[0]?.center) {
-            resolvedCenter = recentExtra[0].center;
-          }
-          if (!spreadsheetTitle) {
-            spreadsheetTitle = "Raw_DB & Extra Class Sheet";
-          }
-        }
       } catch (extraErr: any) {
         console.warn("Could not query extra class sheet for batch-schedule:", extraErr.message);
       }
